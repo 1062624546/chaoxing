@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/net/html"
 	"io"
 	"net"
 	"net/http"
@@ -45,10 +46,10 @@ func newSession(j *persistentJar, path string) *Session {
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, DialContext: (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext, TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 20 * time.Second, MaxIdleConns: 16, MaxIdleConnsPerHost: 4, IdleConnTimeout: 60 * time.Second}
 	client := &http.Client{Transport: transport, Jar: j, Timeout: 30 * time.Second, CheckRedirect: func(r *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
-			return fail("redirect", "登录或页面重定向超过5次，请使用有效 Cookie", 0)
+			return fail("redirect", fmt.Sprintf("页面重定向超过5次：%s → %s（参数已隐藏）", via[len(via)-1].URL.Hostname()+via[len(via)-1].URL.EscapedPath(), r.URL.Hostname()+r.URL.EscapedPath()), 0)
 		}
-		if !validDomain(r.URL.Hostname()) {
-			return fail("redirect", "平台重定向至非学习通域名，已停止", 0)
+		if r.URL.Scheme != "https" || !validDomain(r.URL.Hostname()) {
+			return fail("redirect", "平台重定向至非学习通域名或非HTTPS地址，已停止", 0)
 		}
 		return nil
 	}}
@@ -103,7 +104,9 @@ func (s *Session) request(ctx context.Context, method, address string, query url
 		}
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36")
 		for k, v := range headers {
-			req.Header.Set(k, v)
+			if k != "X-Login-Page" {
+				req.Header.Set(k, v)
+			}
 		}
 		resp, e := s.Client.Do(req)
 		if e != nil {
@@ -133,7 +136,15 @@ func (s *Session) request(ctx context.Context, method, address string, query url
 		if resp.StatusCode == 403 {
 			return nil, fail("blocked", "HTTP 403：平台拒绝访问，停止重试", 403)
 		}
-		if resp.StatusCode == 401 || resp.Request.URL.Hostname() == "passport2.chaoxing.com" && resp.Request.URL.Path != "/fanyalogin" || strings.Contains(string(data), `id="loginBtn"`) || strings.Contains(string(data), `id="formLogin"`) {
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			target, err := resp.Location()
+			destination := "未提供有效跳转地址"
+			if err == nil {
+				destination = target.Hostname() + target.EscapedPath()
+			}
+			return nil, fail("redirect", fmt.Sprintf("HTTP %d：%s 请求重定向至 %s（参数已隐藏）", resp.StatusCode, method, destination), resp.StatusCode)
+		}
+		if resp.StatusCode == 401 || headers["X-Login-Page"] != "1" && (resp.Request.URL.Hostname() == "passport2.chaoxing.com" && resp.Request.URL.Path != "/fanyalogin" || strings.Contains(string(data), `id="loginBtn"`) || strings.Contains(string(data), `id="formLogin"`)) {
 			return nil, fail("expired", "登录会话失效，请更新 Cookie", resp.StatusCode)
 		}
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
@@ -177,25 +188,54 @@ func (s *Session) login(ctx context.Context, c Config) error {
 		if c.Common["username"] == "" || c.Common["password"] == "" {
 			return fail("config", "配置缺少账号密码或 use_cookies=true", 0)
 		}
+		pageURL := "https://passport2.chaoxing.com/login"
+		page, e := s.get(ctx, pageURL, url.Values{"refer": {"https://i.chaoxing.com"}}, map[string]string{"X-Login-Page": "1"}, false)
+		if e != nil {
+			return e
+		}
+		form, e := passwordForm(page, c.Common["username"], c.Common["password"])
+		if e != nil {
+			return e
+		}
 		clone := *s.Client
 		clone.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-		original := s.Client
-		s.Client = &clone
-		b, e := s.postForm(ctx, "https://passport2.chaoxing.com/fanyalogin", url.Values{"fid": {"-1"}, "uname": {encryptCredential(c.Common["username"])}, "password": {encryptCredential(c.Common["password"])}, "refer": {"https%3A%2F%2Fi.chaoxing.com"}, "t": {"true"}, "forbidotherlogin": {"0"}, "validate": {""}, "doubleFactorLogin": {"0"}, "independentId": {"0"}})
-		s.Client = original
+		authSession := &Session{Client: &clone, Jar: s.Jar, Base: s.Base, CookiePath: s.CookiePath}
+		b, e := authSession.request(ctx, "POST", "https://passport2.chaoxing.com/fanyalogin", nil, []byte(form.Encode()), map[string]string{
+			"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest", "Origin": "https://passport2.chaoxing.com", "Referer": pageURL,
+		}, false)
 		if e != nil {
-			var f *Failure
-			if errors.As(e, &f) && f.Status >= 300 && f.Status < 400 {
-				return fail("redirect", "账号密码登录返回重定向，请使用浏览器登录后导入 Cookie", f.Status)
-			}
 			return e
 		}
 		var result map[string]any
 		if json.Unmarshal(b, &result) != nil {
 			return fail("format", "登录返回非 JSON 页面，请使用 Cookie 登录", 0)
 		}
+		if truth(result["containTwoFactorLogin"]) || truth(result["weakpwd"]) {
+			return fail("verification", "平台要求双因子验证或修改弱密码，请在官方网页完成", 0)
+		}
 		if !truth(result["status"]) {
-			return fail("expired", "账号密码登录失败，请在官方页面检查并使用 Cookie", 0)
+			message := str(result["msg2"]) + str(result["msg"]) + str(result["mes"])
+			switch {
+			case strings.Contains(message, "验证码"), strings.Contains(message, "验证"), strings.Contains(message, "频繁"):
+				return fail("verification", "登录接口要求验证或限制登录频率，请在官方网页确认", 0)
+			case strings.Contains(message, "密码"), strings.Contains(message, "账号"), strings.Contains(message, "用户名"):
+				return fail("credentials", "登录接口报告账号或密码错误，请核对配置", 0)
+			default:
+				return fail("credentials", "登录接口拒绝账号密码，返回 status=false（响应内容已隐藏）", 0)
+			}
+		}
+		if destination := str(result["url"]); destination != "" {
+			decoded, err := url.PathUnescape(destination)
+			if err != nil {
+				return fail("format", "登录返回的跳转地址无法解析", 0)
+			}
+			target, err := url.Parse(decoded)
+			if err != nil || target.Scheme != "https" || !validDomain(target.Hostname()) || target.User != nil {
+				return fail("redirect", "登录返回非可信HTTPS跳转地址，已停止", 0)
+			}
+			if _, err = s.get(ctx, target.String(), nil, nil, false); err != nil {
+				return err
+			}
 		}
 	}
 	uid, e := s.Jar.value("_uid")
@@ -259,4 +299,30 @@ func qv(m map[string]string) url.Values {
 		q.Set(k, v)
 	}
 	return q
+}
+
+// Read the same hidden form fields used by the official password login page.
+func passwordForm(page []byte, username, password string) (url.Values, error) {
+	root, e := parseDOM(page)
+	if e != nil {
+		return nil, e
+	}
+	inputs := collect(root, func(n *html.Node) bool { return n.Type == html.ElementNode && n.Data == "input" })
+	fields := map[string]string{}
+	for _, n := range inputs {
+		fields[attr(n, "id")] = attr(n, "value")
+	}
+	if fields["needVcode"] == "1" {
+		return nil, fail("verification", "平台要求验证码，请在官方网页完成验证", 0)
+	}
+	if fields["t"] != "true" || fields["fid"] == "" || fields["refer"] == "" {
+		return nil, fail("format", "官方登录页面缺少预期表单字段，停止提交账号密码", 0)
+	}
+	form := url.Values{}
+	for _, key := range []string{"fid", "refer", "t", "forbidotherlogin", "validate", "doubleFactorLogin", "independentId", "independentNameId"} {
+		form.Set(key, fields[key])
+	}
+	form.Set("uname", encryptCredential(strings.TrimSpace(username)))
+	form.Set("password", encryptCredential(password))
+	return form, nil
 }

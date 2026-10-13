@@ -186,7 +186,7 @@ func TestHTTPFailureClassification(t *testing.T) {
 		status int
 		kind   string
 		retry  bool
-	}{{401, "expired", false}, {403, "blocked", false}, {429, "blocked", false}, {404, "blocked", false}, {503, "server", true}, {302, "server", false}} {
+	}{{401, "expired", false}, {403, "blocked", false}, {429, "blocked", false}, {404, "blocked", false}, {503, "server", true}, {302, "redirect", false}} {
 		s, server := fixtureSession(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(tc.status) })
 		_, e := s.get(context.Background(), server.URL, nil, nil, false)
 		var f *Failure
@@ -528,6 +528,9 @@ func TestPasswordRedirectOneAttempt(t *testing.T) {
 	s := newSession(newJar(), filepath.Join(t.TempDir(), "cookies.txt"))
 	var n int
 	s.Client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/login" {
+			return fakeResponse(r, 200, loginFixture), nil
+		}
 		n++
 		resp := fakeResponse(r, 302, "")
 		resp.Header.Set("Location", "https://passport2.chaoxing.com/login")
@@ -629,5 +632,68 @@ func TestNoUnconfirmedCompletionAfterDocument(t *testing.T) {
 	out, e := runner.chapter(context.Background(), ChapterTask{})
 	if e != nil || out != Pending {
 		t.Fatal(out, e)
+	}
+}
+
+const loginFixture = `<input id="fid" value="-1"><input id="t" value="true"><input id="refer" value="https%3A%2F%2Fi.chaoxing.com"><input id="independentNameId" value="0">`
+
+func TestPasswordLoginOfficialFlow(t *testing.T) {
+	s := newSession(newJar(), filepath.Join(t.TempDir(), "cookies.txt"))
+	var paths []string
+	s.Client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case "/login":
+			res := fakeResponse(r, 200, loginFixture)
+			res.Header.Add("Set-Cookie", "JSESSIONID=initial; Path=/; Secure; HttpOnly")
+			return res, nil
+		case "/fanyalogin":
+			r.ParseForm()
+			if r.Form.Get("uname") != encryptCredential("fake") || r.Form.Get("password") != encryptCredential("fake") || r.Form.Get("independentNameId") != "0" {
+				t.Error("incorrect official form")
+			}
+			if c, e := r.Cookie("JSESSIONID"); e != nil || c.Value != "initial" {
+				t.Error("missing initial session")
+			}
+			if r.Header.Get("Origin") != "https://passport2.chaoxing.com" || r.Header.Get("Referer") == "" {
+				t.Error("missing page headers")
+			}
+			return fakeResponse(r, 200, `{"status":true,"url":"https%3A%2F%2Fi.chaoxing.com%2Fcallback%3Fticket%3Dsecret"}`), nil
+		case "/callback":
+			res := fakeResponse(r, 200, "home")
+			res.Header.Add("Set-Cookie", "_uid=123; Domain=.chaoxing.com; Path=/; Secure")
+			return res, nil
+		default:
+			return fakeResponse(r, 200, "courses"), nil
+		}
+	})
+	if e := s.login(context.Background(), Config{Common: map[string]string{"username": " fake ", "password": "fake"}}); e != nil {
+		t.Fatal(e)
+	}
+	if len(paths) != 4 || paths[0] != "/login" || paths[1] != "/fanyalogin" || paths[2] != "/callback" {
+		t.Fatal(paths)
+	}
+	if _, e := loadCookies(s.CookiePath); e != nil {
+		t.Fatal(e)
+	}
+}
+func TestPasswordFormStopsBeforeVerification(t *testing.T) {
+	for _, page := range []string{loginFixture + `<input id="needVcode" value="1">`, `unexpected page`} {
+		if _, e := passwordForm([]byte(page), "fake", "fake"); e == nil {
+			t.Fatal("unexpected password submission")
+		}
+	}
+}
+func TestRedirectDiagnosticHidesSecrets(t *testing.T) {
+	s := newSession(newJar(), "")
+	s.Client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	s.Client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		res := fakeResponse(r, 302, "")
+		res.Header.Set("Location", "https://passport2.chaoxing.com/login?ticket=SECRET&password=PASSWORD")
+		return res, nil
+	})
+	_, e := s.get(context.Background(), "https://passport2.chaoxing.com/fanyalogin", nil, nil, false)
+	if e == nil || strings.Contains(e.Error(), "SECRET") || strings.Contains(e.Error(), "PASSWORD") || !strings.Contains(e.Error(), "passport2.chaoxing.com/login") {
+		t.Fatal(e)
 	}
 }
