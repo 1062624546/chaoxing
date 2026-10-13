@@ -7,9 +7,6 @@ services:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
     init: true
     restart: "no"
-    cpus: 0.5
-    mem_limit: 512m
-    memswap_limit: 512m
     pids_limit: 64
     read_only: true
     security_opt:
