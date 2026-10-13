@@ -6,6 +6,7 @@ __pycache__
 *.pyc
 *.log
 cookies*
+!cookies.go
 config.ini
 config/
 logs/
