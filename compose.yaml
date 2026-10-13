@@ -5,6 +5,10 @@ services:
       context: .
       args:
         VERSION: ${CHAOXING_VERSION:-go-dev}
+        GO_BUILD_IMAGE: ${CHAOXING_GO_BUILD_IMAGE:-m.daocloud.io/docker.io/library/golang:1.27.2-alpine}
+        GO_RUNTIME_IMAGE: ${CHAOXING_GO_RUNTIME_IMAGE:-m.daocloud.io/docker.io/library/alpine:3.23}
+        GO_MODULE_PROXY: ${CHAOXING_GO_MODULE_PROXY:-https://goproxy.cn}
+        ALPINE_MIRROR: ${CHAOXING_ALPINE_MIRROR:-https://mirrors.aliyun.com/alpine}
     init: true
     restart: "no"
     pids_limit: 64

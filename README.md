@@ -71,6 +71,18 @@ docker compose -p chaoxing-go logs --tail=100 -f chaoxing
 
 如果本地已有 `go` 分支，用 `git switch go`、`git pull --ff-only origin go` 更新。若有未提交改动，先备份或保存改动再切换。
 
+Docker 默认使用国内构建源：基础镜像通过 DaoCloud 公共镜像站，Go 模块使用 `https://goproxy.cn`，Alpine 包使用阿里云镜像。保留 HTTPS、`go.sum` 和 Go 校验数据库验证；不修改宿主 Docker 配置、不重启 Docker 服务。可通过 Compose 构建参数或 `CHAOXING_GO_BUILD_IMAGE`、`CHAOXING_GO_RUNTIME_IMAGE`、`CHAOXING_GO_MODULE_PROXY`、`CHAOXING_ALPINE_MIRROR` 环境变量替换源。
+
+如果基础镜像已缓存，想继续使用原镜像并只更换依赖源：
+
+```bash
+CHAOXING_GO_BUILD_IMAGE=golang:1.27.2-alpine CHAOXING_GO_RUNTIME_IMAGE=alpine:3.23 docker compose -p chaoxing-go build
+```
+
+Go 依赖报错中出现 `proxy.golang.org` 超时，说明旧 Dockerfile 没配置国内 Go Proxy；更新本分支后重新构建，不需要 `--no-cache`。
+
+来源：[DaoCloud 镜像站](https://github.com/DaoCloud/public-image-mirror)、[Goproxy.cn](https://github.com/goproxy/goproxy.cn)。本次环境访问国内站点被出口代理超时阻断，未验证用户服务器连通性，也未实测 Docker 镜像构建。
+
 Docker 使用 Go 多阶段编译与缓存，最终镜像仅包含二进制、证书、时区和模板，不安装 Python 依赖。未设置 CPU/内存上限；保留非 root、只读根目录、无额外权限、独立网络、不开放端口。任务执行一次后退出，不自动循环重启。
 
 **首次构建仍会下载 Go 构建镜像、运行镜像与 Go 模块，速度取决于网络。** 以后只改配置/Cookie 不需要构建，只改代码能使用模块与编译缓存。本机没有 Docker 守护进程，尚未验证真实 Docker 构建。

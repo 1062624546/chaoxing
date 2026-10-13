@@ -1,7 +1,10 @@
-# syntax=docker/dockerfile:1
-FROM golang:1.27.2-alpine AS builder
+# Use the bundled BuildKit frontend to avoid an extra Docker Hub frontend pull.
+ARG GO_BUILD_IMAGE=m.daocloud.io/docker.io/library/golang:1.27.2-alpine
+ARG GO_RUNTIME_IMAGE=m.daocloud.io/docker.io/library/alpine:3.23
+FROM ${GO_BUILD_IMAGE} AS builder
 WORKDIR /src
-ENV CGO_ENABLED=0
+ARG GO_MODULE_PROXY=https://goproxy.cn
+ENV CGO_ENABLED=0 GOPROXY=${GO_MODULE_PROXY} GOSUMDB=sum.golang.org GOTOOLCHAIN=local
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY *.go ./
@@ -10,8 +13,10 @@ ARG VERSION=go-dev
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
     go test ./... && go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/chaoxing .
 
-FROM alpine:3.23
-RUN apk add --no-cache ca-certificates tzdata \
+FROM ${GO_RUNTIME_IMAGE}
+ARG ALPINE_MIRROR=https://mirrors.aliyun.com/alpine
+RUN sed -i "s|https\?://dl-cdn.alpinelinux.org/alpine|${ALPINE_MIRROR}|g" /etc/apk/repositories \
+    && apk add --no-cache ca-certificates tzdata \
     && addgroup -g 10001 chaoxing && adduser -D -u 10001 -G chaoxing chaoxing \
     && mkdir -p /app /config /logs && chown -R 10001:10001 /app /config /logs
 WORKDIR /app
