@@ -737,6 +737,9 @@ func TestOfficialChapterTransferAndCardReferer(t *testing.T) {
 		steps = append(steps, r.URL.Path)
 		switch r.URL.Path {
 		case "/mycourse/transfer":
+			if r.Header.Get("Referer") != "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse?courseid=course" {
+				t.Error("missing catalog Referer")
+			}
 			target, e := url.Parse(r.URL.Query().Get("refer"))
 			if e != nil {
 				t.Fatal(e)
@@ -768,7 +771,7 @@ func TestOfficialChapterTransferAndCardReferer(t *testing.T) {
 			return nil, nil
 		}
 	})
-	_, _, e := s.jobs(context.Background(), Course{ID: "course", ClassID: "class", CPI: "cpi"}, Point{ID: "chapter", StudyEnc: "fixture-signature"})
+	_, _, e := s.jobs(context.Background(), Course{ID: "course", ClassID: "class", CPI: "cpi"}, Point{ID: "chapter", StudyEnc: "fixture-signature", CatalogURL: "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse?courseid=course"})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -803,5 +806,12 @@ func TestThreeFailuresStopQueue(t *testing.T) {
 	results := runner.run(context.Background(), tasks)
 	if len(results) != 3 {
 		t.Fatalf("expected stop after 3 failures, got %d", len(results))
+	}
+}
+
+func TestSummarySeparatesUnstarted(t *testing.T) {
+	out := summary([]TaskResult{{Outcome: Failed}, {Outcome: Failed}, {Outcome: Failed}}, 163)
+	if !strings.Contains(out, "失败 3，未执行 160") {
+		t.Fatal(out)
 	}
 }

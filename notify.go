@@ -66,8 +66,9 @@ func summary(results []TaskResult, total int) string {
 	for _, res := range results {
 		counts[res.Outcome]++
 	}
-	if len(results) < total {
-		counts[Failed] += total - len(results)
+	notStarted := total - len(results)
+	if notStarted < 0 {
+		notStarted = 0
 	}
-	return strings.TrimSpace(fmt.Sprintf("任务处理结束：完成 %d，待确认/仅保存 %d，跳过 %d，失败 %d", counts[Completed], counts[Pending], counts[Skipped], counts[Failed]))
+	return strings.TrimSpace(fmt.Sprintf("任务处理结束：完成 %d，待确认/仅保存 %d，跳过 %d，失败 %d，未执行 %d", counts[Completed], counts[Pending], counts[Skipped], counts[Failed], notStarted))
 }

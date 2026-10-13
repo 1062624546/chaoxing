@@ -18,6 +18,7 @@ type Point struct {
 	Finished, Locked bool
 	JobCount         int
 	StudyEnc         string
+	CatalogURL       string
 }
 type Job struct {
 	Kind          string
@@ -202,11 +203,20 @@ func parsePoints(b []byte) ([]Point, error) {
 	return out, nil
 }
 func (s *Session) points(ctx context.Context, c Course) ([]Point, error) {
-	b, e := s.get(ctx, "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse", qv(map[string]string{"courseid": c.ID, "clazzid": c.ClassID, "cpi": c.CPI, "ut": "s"}), nil, true)
+	address := "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse"
+	q := qv(map[string]string{"courseid": c.ID, "clazzid": c.ClassID, "cpi": c.CPI, "ut": "s"})
+	b, e := s.get(ctx, address, q, nil, true)
 	if e != nil {
 		return nil, e
 	}
-	return parsePoints(b)
+	points, e := parsePoints(b)
+	if e != nil {
+		return nil, e
+	}
+	for i := range points {
+		points[i].CatalogURL = address + "?" + q.Encode()
+	}
+	return points, nil
 }
 
 var mArgRE = regexp.MustCompile(`\bmArg\s*=\s*\{`)
@@ -364,7 +374,7 @@ func (s *Session) openChapter(ctx context.Context, c Course, p Point) (string, e
 		return nil
 	}
 	navigation := &Session{Client: &client, Jar: s.Jar, Base: s.Base, CookiePath: s.CookiePath}
-	_, err = navigation.get(ctx, transfer.String(), nil, map[string]string{"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}, false)
+	_, err = navigation.get(ctx, transfer.String(), nil, map[string]string{"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "zh-CN,zh;q=0.9", "Referer": p.CatalogURL}, false)
 	if err != nil {
 		return "", err
 	}
