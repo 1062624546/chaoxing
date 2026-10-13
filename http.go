@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -134,6 +135,7 @@ func (s *Session) request(ctx context.Context, method, address string, query url
 			return nil, fail("format", "响应超过16MB限制", 0)
 		}
 		if resp.StatusCode == 403 {
+			info("403诊断：响应类型=%s；响应字节数=%d；Referer=%s；页面提示=%s", resp.Header.Get("Content-Type"), len(data), debugReferer(resp.Request.Header.Get("Referer")), responseHint(data))
 			return nil, fail("blocked", fmt.Sprintf("HTTP 403：%s %s%s 被拒绝，停止重试（参数已隐藏）", method, resp.Request.URL.Hostname(), resp.Request.URL.EscapedPath()+" 参数="+debugQuery(resp.Request.URL.Query())), 403)
 		}
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
@@ -339,4 +341,51 @@ func debugQuery(q url.Values) string {
 		}
 	}
 	return out.Encode()
+}
+
+func debugReferer(address string) string {
+	if address == "" {
+		return "未发送"
+	}
+	u, e := url.Parse(address)
+	if e != nil || u.Hostname() == "" {
+		return "无效地址"
+	}
+	return u.Hostname() + u.EscapedPath() + "?" + debugQuery(u.Query())
+}
+
+var opaqueDiagnosticRE = regexp.MustCompile(`[A-Za-z0-9_+/%.=-]{24,}`)
+var personalDiagnosticRE = regexp.MustCompile(`\b[0-9]{11,}\b|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`)
+
+func responseHint(data []byte) string {
+	root, e := parseDOM(data)
+	if e != nil {
+		return "响应无法解析"
+	}
+	// Never log scripts, style, hidden fields, links, or attribute values.
+	var remove func(*html.Node)
+	remove = func(n *html.Node) {
+		for c := n.FirstChild; c != nil; {
+			next := c.NextSibling
+			if c.Data == "script" || c.Data == "style" || c.Data == "input" || c.Data == "textarea" || attr(c, "hidden") != "" || strings.Contains(strings.ReplaceAll(attr(c, "style"), " ", ""), "display:none") {
+				n.RemoveChild(c)
+			} else {
+				remove(c)
+			}
+			c = next
+		}
+	}
+	remove(root)
+	hint := strings.Join(strings.Fields(text(root)), " ")
+	hint = redact(hint)
+	hint = opaqueDiagnosticRE.ReplaceAllString(hint, "[长值已隐藏]")
+	hint = personalDiagnosticRE.ReplaceAllString(hint, "[个人信息已隐藏]")
+	chars := []rune(hint)
+	if len(chars) > 500 {
+		hint = string(chars[:500]) + "…"
+	}
+	if hint == "" {
+		return "无可见错误文本"
+	}
+	return hint
 }

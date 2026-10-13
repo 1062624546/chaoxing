@@ -815,3 +815,14 @@ func TestSummarySeparatesUnstarted(t *testing.T) {
 		t.Fatal(out)
 	}
 }
+
+func Test403HintDoesNotExposeHTMLSecrets(t *testing.T) {
+	hint := responseHint([]byte(`<title>禁止访问</title><script>Cookie=SCRIPT_SECRET</script><input value="INPUT_SECRET"><div style="display:none">HIDDEN_SECRET</div><p>访问被拒绝 ticket=SHORT_SECRET</p>`))
+	if !strings.Contains(hint, "禁止访问") || strings.Contains(hint, "SECRET") {
+		t.Fatal(hint)
+	}
+	ref := debugReferer("https://mooc2-ans.chaoxing.com/studentcourse?courseid=123&stuenc=SECRET")
+	if strings.Contains(ref, "SECRET") || !strings.Contains(ref, "courseid=123") {
+		t.Fatal(ref)
+	}
+}
