@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,9 +36,10 @@ type TaskResult struct {
 	Attempts int
 }
 type Runner struct {
-	Session *Session
-	Config  Config
-	Answers *AnswerEngine
+	Session         *Session
+	Config          Config
+	Answers         *AnswerEngine
+	ChapterInterval time.Duration
 }
 
 func (r *Runner) chapter(ctx context.Context, t ChapterTask) (Outcome, error) {
@@ -101,6 +103,11 @@ func (r *Runner) chapter(ctx context.Context, t ChapterTask) (Outcome, error) {
 	return Completed, nil
 }
 func (r *Runner) run(ctx context.Context, tasks []ChapterTask) []TaskResult {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var failures atomic.Int32
+	var startMu sync.Mutex
+	var lastStart time.Time
 	queue := make(chan ChapterTask)
 	results := make(chan TaskResult, len(tasks))
 	var wg sync.WaitGroup
@@ -113,8 +120,27 @@ func (r *Runner) run(ctx context.Context, tasks []ChapterTask) []TaskResult {
 		go func() {
 			defer wg.Done()
 			for task := range queue {
+				if ctx.Err() != nil {
+					return
+				}
+
 				res := TaskResult{Task: task, Outcome: Failed}
 				for attempt := 1; attempt <= r.Config.MaxAttempts; attempt++ {
+					if ctx.Err() != nil {
+						break
+					}
+					if !task.Point.Finished {
+						startMu.Lock()
+						e := sleepContext(ctx, time.Until(lastStart.Add(r.ChapterInterval)))
+						if e == nil {
+							lastStart = time.Now()
+						}
+						startMu.Unlock()
+						if e != nil {
+							res.Err = e
+							break
+						}
+					}
 					res.Attempts = attempt
 					res.Outcome, res.Err = r.chapter(ctx, task)
 					if res.Err == nil {
@@ -127,8 +153,15 @@ func (r *Runner) run(ctx context.Context, tasks []ChapterTask) []TaskResult {
 							res.Err = nil
 							break
 						}
-					} else if !retryable(res.Err) {
-						break
+					} else {
+						if !errors.Is(res.Err, context.Canceled) && failures.Add(1) >= 3 {
+							info("本次运行累计3次错误，停止整个任务队列")
+							cancel()
+							break
+						}
+						if !retryable(res.Err) {
+							break
+						}
 					}
 					if attempt < r.Config.MaxAttempts {
 						if e := sleepContext(ctx, r.Config.RetryInterval); e != nil {

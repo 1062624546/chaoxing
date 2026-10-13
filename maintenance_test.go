@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -788,5 +789,19 @@ func TestChapterEncFromCoursePage(t *testing.T) {
 	points, e := parsePoints([]byte(`<input id="enc" value="fixture"><div id="cur123"><a class="clicktitle">chapter</a></div>`))
 	if e != nil || len(points) != 1 || points[0].StudyEnc != "fixture" {
 		t.Fatal(points, e)
+	}
+}
+
+func TestThreeFailuresStopQueue(t *testing.T) {
+	s, server := fixtureSession(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(403) })
+	defer server.Close()
+	runner := Runner{Session: s, Config: Config{Jobs: 1, MaxAttempts: 1}}
+	tasks := []ChapterTask{}
+	for i := 0; i < 10; i++ {
+		tasks = append(tasks, ChapterTask{Point: Point{ID: fmt.Sprint(i)}})
+	}
+	results := runner.run(context.Background(), tasks)
+	if len(results) != 3 {
+		t.Fatalf("expected stop after 3 failures, got %d", len(results))
 	}
 }

@@ -179,7 +179,7 @@ func execute(ctx context.Context, args []string) int {
 		info("没有需要处理的章节")
 		return 0
 	}
-	runner := Runner{Session: s, Config: c, Answers: answers}
+	runner := Runner{Session: s, Config: c, Answers: answers, ChapterInterval: 3 * time.Second}
 	results := runner.run(ctx, tasks)
 	message := summary(results, len(tasks))
 	info("%s", message)
