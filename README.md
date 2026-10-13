@@ -1,3 +1,5 @@
+> Fork 维护与 Docker 部署说明：[维护与部署](docs/维护与部署.md)。Cookie 模式不会自动退回账号密码登录，HTTP 403 不再标记成功。
+
 # :computer: 超星学习通自动化完成任务点(命令行版)
 
 <p align="center">

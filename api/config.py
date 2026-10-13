@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
+import os
+
 class GlobalConst:
     AESKey = "u2oh6Vu^HWe4_AES"
-    COOKIES_PATH = "cookies.txt"
+    COOKIES_PATH = os.environ.get("CHAOXING_COOKIES_PATH", "cookies.txt")
 
     HEADERS = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",

@@ -11,7 +11,8 @@ from typing import Any
 from tqdm import tqdm
 from api.answer import Tiku
 from api.base import Chaoxing, Account, StudyResult
-from api.exceptions import LoginError, InputFormatError
+from api.exceptions import LoginError, InputFormatError, AccessDenied, SessionExpired, ResponseFormatError, RemoteHTTPError
+from requests.exceptions import RequestException
 from api.logger import logger
 from api.notification import Notification
 from api.live import Live
@@ -33,6 +34,7 @@ class ChapterResult(enum.Enum):
     ERROR = 1,
     NOT_OPEN = 2,
     PENDING = 3
+    BLOCKED = 4
 
 
 def log_error(func):
@@ -41,7 +43,7 @@ def log_error(func):
             func(*args, **kwargs)
         except BaseException as e:
             logger.error(f"Error in thread {threading.current_thread().name}: {e}")
-            traceback.print_exception(type(e), e, e.__traceback__)
+            # Raw tracebacks can contain credential-bearing request URLs.
             raise
 
     return wrapper
@@ -119,8 +121,9 @@ def parse_args():
 
 def load_config_from_file(config_path):
     """从配置文件加载设置"""
-    config = configparser.ConfigParser()
-    config.read(config_path, encoding="utf8")
+    config = configparser.ConfigParser(interpolation=None)
+    if not config.read(config_path, encoding="utf-8-sig"):
+        raise InputFormatError("配置文件不存在或无法读取")
 
     common_config: dict[str, Any] = {}
     tiku_config: dict[str, Any] = {}
@@ -216,6 +219,8 @@ def init_chaoxing(common_config, tiku_config, config_path=None):
 
     # 如果没有提供用户名密码，从命令行获取
     if (not username or not password) and not use_cookies:
+        if not sys.stdin.isatty():
+            raise LoginError("非交互运行必须配置账号密码或 use_cookies=true")
         username = input("请输入你的手机号, 按回车确认\n手机号:")
         password = input("请输入你的密码, 按回车确认\n密码:")
 
@@ -237,6 +242,8 @@ def init_chaoxing(common_config, tiku_config, config_path=None):
             logger.info(f'正在验证大模型配置 (provider={provider})...')
             if not tiku.check_llm_connection():
                 logger.error('大模型连接检查失败')
+                if not sys.stdin.isatty():
+                    raise RuntimeError('大模型连接检查失败，请修复配置后重新运行')
                 choice = input('大模型连接检查失败，无法准确答题，是否继续运行？(Y/n): ').strip().lower()
                 # 直接回车默认继续运行
                 if choice not in ('', 'y', 'yes'):
@@ -354,6 +361,7 @@ class JobProcessor:
         self.max_tries = 5
         self.tasks = tasks
         self.failed_tasks: list[ChapterTask] = []
+        self.skipped_tasks: list[ChapterTask] = []
         self.task_queue: PriorityQueue[ChapterTask] = PriorityQueue()
         self.retry_queue: PriorityQueue[ChapterTask] = PriorityQueue()
         self.wait_queue: PriorityQueue[ChapterTask] = PriorityQueue()
@@ -377,6 +385,7 @@ class JobProcessor:
         time.sleep(0.5)
         if hasattr(self.task_queue, "shutdown"):
             self.task_queue.shutdown()
+            self.retry_queue.shutdown()
 
     @log_error
     def worker_thread(self):
@@ -387,7 +396,11 @@ class JobProcessor:
                 logger.info("Queue shut down")
                 return
 
-            task.result = process_chapter(self.chaoxing, task.course, task.point, self.speed)
+            try:
+                task.result = process_chapter(self.chaoxing, task.course, task.point, self.speed)
+            except Exception as exc:
+                logger.error("章节处理异常：{}（不输出请求或响应内容）", type(exc).__name__)
+                task.result = ChapterResult.BLOCKED
 
             match task.result:
                 case ChapterResult.SUCCESS:
@@ -398,6 +411,7 @@ class JobProcessor:
                 case ChapterResult.NOT_OPEN:
                     if self.config["notopen_action"] == "continue":
                         logger.warning("章节未开启: {} - {}, 正在跳过", task.course["title"], task.point["title"])
+                        self.skipped_tasks.append(task)
                         self.task_queue.task_done()
                         continue
 
@@ -407,6 +421,7 @@ class JobProcessor:
                             "章节未开启: {} - {} 可能由于上一章节的章节检测未完成, 也可能由于该章节因为时效已关闭，"
                             "请手动检查完成并提交再重试。或者在配置中配置(自动跳过关闭章节/开启题库并启用提交)"
                             , task.course["title"], task.point["title"])
+                        self.failed_tasks.append(task)
                         self.task_queue.task_done()
                         continue
 
@@ -456,7 +471,14 @@ def process_chapter(chaoxing: Chaoxing, course: dict[str, Any], point: dict[str,
 
     # 获取当前章节的所有任务点
     job_info = None
-    jobs, job_info = chaoxing.get_job_list(course, point)
+    try:
+        jobs, job_info = chaoxing.get_job_list(course, point)
+    except (AccessDenied, SessionExpired, ResponseFormatError) as exc:
+        logger.error("{}", exc)
+        return ChapterResult.BLOCKED
+    except (RequestException, RemoteHTTPError) as exc:
+        logger.warning("获取任务点失败：{}", type(exc).__name__)
+        return ChapterResult.ERROR
 
     # 发现未开放章节, 根据配置处理
     if job_info.get("notOpen", False):
@@ -468,7 +490,16 @@ def process_chapter(chaoxing: Chaoxing, course: dict[str, Any], point: dict[str,
 
     job_results: list[StudyResult] = []
     for job in jobs:
-        result = process_job(chaoxing, course, job, job_info, speed)
+        try:
+            result = process_job(chaoxing, course, job, job_info, speed)
+        except (AccessDenied, SessionExpired, ResponseFormatError) as exc:
+            logger.error("{}", exc)
+            return ChapterResult.BLOCKED
+        except RequestException as exc:
+            logger.warning("任务请求失败：{}", type(exc).__name__)
+            return ChapterResult.ERROR
+        if result == StudyResult.FORBIDDEN:
+            return ChapterResult.BLOCKED
         job_results.append(result)
 
     for result in job_results:
@@ -507,6 +538,8 @@ def filter_courses(all_course, course_list):
     """过滤要学习的课程"""
     if not course_list:
         # 手动输入要学习的课程ID列表
+        if not sys.stdin.isatty():
+            raise InputFormatError("非交互运行必须配置 course_list")
         print("*" * 10 + "课程列表" + "*" * 10)
         for course in all_course:
             print(f"ID: {course['courseId']} 班级ID: {course['clazzId']} 课程名: {course['title']}")
@@ -528,9 +561,9 @@ def filter_courses(all_course, course_list):
             course_task.append(course)
             seen_keys.add(key)
     
-    # 如果没有指定课程，则学习所有课程
+    # 不因课程 ID 配错而意外执行全部课程
     if not course_task:
-        course_task = all_course
+        raise InputFormatError("指定的课程 ID 未匹配，请检查 course_list")
 
     return course_task
 
@@ -603,8 +636,14 @@ def main():
 
         tqdm.format_sizeof = _old_format_sizeof
 
-        logger.info("所有课程学习任务已完成")
-        notification.send("chaoxing : 所有课程学习任务已完成")
+        if p.failed_tasks:
+            raise RuntimeError(f"{len(p.failed_tasks)} 个章节失败或被拒绝访问，未完成全部任务")
+        if p.skipped_tasks:
+            message = f"任务处理结束；{len(p.skipped_tasks)} 个未开放章节按配置跳过"
+        else:
+            message = "所有课程学习任务已完成"
+        logger.info(message)
+        notification.send(f"chaoxing : {message}")
 
         # 刷课完成后，如果开启了增加章节学习次数，则执行
         if add_learning_count:
@@ -623,12 +662,12 @@ def main():
         logger.error(f"错误: 程序被用户手动中断, {e}")
     except BaseException as e:
         logger.error(f"错误: {type(e).__name__}: {e}")
-        logger.error(traceback.format_exc())
+        logger.error("异常类型：{}", type(e).__name__)
         try:
-            notification.send(f"chaoxing : 出现错误 {type(e).__name__}: {e}\n{traceback.format_exc()}")
+            notification.send(f"chaoxing : 出现错误 {type(e).__name__}，请查看本地日志")
         except Exception:
             pass  # 如果通知发送失败，忽略异常
-        raise e
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

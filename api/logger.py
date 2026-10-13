@@ -1,4 +1,6 @@
 import sys
+import os
+from api.security import scrub_record
 
 from loguru import logger
 from tqdm import tqdm
@@ -33,6 +35,7 @@ def tqdm_sink(msg):
     tqdm_stream.flush()
 
 
+logger.configure(patcher=scrub_record)
 logger.remove()
-logger.add(tqdm_sink, colorize=True, enqueue=True)
-logger.add("chaoxing.log", rotation="10 MB", level="TRACE")
+logger.add(tqdm_sink, colorize=True, enqueue=True, level="INFO", diagnose=False, backtrace=False)
+logger.add(os.environ.get("CHAOXING_LOG_PATH", "chaoxing.log"), rotation="5 MB", retention=3, level="INFO", diagnose=False, backtrace=False)

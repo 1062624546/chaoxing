@@ -171,7 +171,7 @@ def decode_course_card(html_text: str) -> Tuple[List[Dict[str, Any]], Dict[str, 
         return [], {"notOpen": True}
 
     # 提取mArg参数
-    temp = re.findall(r"mArg=\{(.*?)\};", html_text.replace(" ", ""))
+    temp = re.findall(r"mArg\s*=\s*\{(.*?)\}\s*;", html_text, re.S)
     if not temp:
         return [], {}
 

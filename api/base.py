@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-import functools
 import random
 import secrets
 import re
@@ -14,7 +13,6 @@ from typing_extensions import Self
 import requests
 from loguru import logger
 from requests import RequestException
-from requests.adapters import HTTPAdapter
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception
 from tqdm import tqdm
 
@@ -23,6 +21,8 @@ from api.answer_check import cut
 from api.cipher import AESCipher
 from api.config import GlobalConst as gc
 from api.cookies import save_cookies, use_cookies
+from api.http import ManagedSession, check_response
+from api.exceptions import ResponseFormatError
 from api.decode import (
     decode_course_list,
     decode_course_point,
@@ -40,21 +40,21 @@ class SessionManager:
     _instance = None
     _login_lock = threading.Lock()
 
+    _instance_lock = threading.RLock()
+
     def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+        with cls._instance_lock:
+            if cls._instance is None:
+                instance = super().__new__(cls)
+                instance._session = ManagedSession()
+                instance._session.headers.clear()
+                instance._session.headers.update(gc.HEADERS)
+                instance._session.cookies.update(use_cookies())
+                cls._instance = instance
+            return cls._instance
 
     def __init__(self):
-        self._session = requests.Session()
-        self._session.mount("https://", HTTPAdapter(max_retries=10))
-        self._session.mount("http://", HTTPAdapter(max_retries=10))
-        self._session.request = functools.partial(self._session.request, timeout=5)
-        # For debug purposes
-        # self._session.verify=False
-        self._session.headers.clear()
-        self._session.headers.update(gc.HEADERS)
-        self._session.cookies.update(use_cookies())
+        pass
 
     @classmethod
     def get_instance(cls) -> Self:
@@ -67,7 +67,11 @@ class SessionManager:
 
     @classmethod
     def update_cookies(cls):
-        cls.get_instance()._session.cookies.update(use_cookies())
+        session = cls.get_instance()._session
+        with session.lock:
+            cookies = use_cookies()
+            session.cookies.clear()
+            session.cookies.update(cookies)
 
     @classmethod
     def relogin_if_needed(cls, chaoxing_instance) -> bool:
@@ -77,6 +81,9 @@ class SessionManager:
                 return True
 
             logger.info("Cookie session invalid, attempting thread-safe relogin...")
+            if getattr(chaoxing_instance, "_cookie_login", False):
+                logger.warning("Cookie 模式已失效，请手动更新 Cookie")
+                return False
             if chaoxing_instance.account and chaoxing_instance.account.username and chaoxing_instance.account.password:
                 login_result = chaoxing_instance.login(login_with_cookies=False)
                 if login_result.get("status"):
@@ -391,15 +398,14 @@ class Chaoxing:
         self.video_log_limiter = RateLimiter(2)  # 上报进度极其容易卡验证码，限制2s一次
 
     def login(self, login_with_cookies=False):
+        self._cookie_login = login_with_cookies
         if login_with_cookies:
             logger.info("Logging in with cookies")
             SessionManager.update_cookies()
-            logger.debug(f"Logged in with cookies: {SessionManager.get_instance()._session.cookies}")
+            logger.debug("已加载 Cookie 文件（不记录内容）")
             if not self._validate_cookie_session():
-                logger.warning("Cookie 登录校验失败，尝试使用账号密码重新登录")
-                if self.account and self.account.username and self.account.password:
-                    return self.login(login_with_cookies=False)
-                return {"status": False, "msg": "cookies 已失效，请更新 cookies 或提供账号密码"}
+                logger.warning("Cookie 登录校验失败，请在官方浏览器登录后更新 Cookie 文件")
+                return {"status": False, "msg": "Cookie 已失效；Cookie 模式不会回退到账号密码登录"}
             logger.info("登录成功...")
             try:
                 realname = self.get_name()
@@ -409,7 +415,9 @@ class Chaoxing:
                 logger.debug(f"获取当前登录用户名失败: {e}")
             return {"status": True, "msg": "登录成功"}
 
-        _session = requests.Session()
+        if not self.account or not self.account.username or not self.account.password:
+            return {"status": False, "msg": "未提供账号密码"}
+        _session = ManagedSession()
         _url = "https://passport2.chaoxing.com/fanyalogin"
         _data = {
             "fid": "-1",
@@ -423,8 +431,16 @@ class Chaoxing:
             "independentId": 0,
         }
         logger.trace("正在尝试登录...")
-        resp = _session.post(_url, headers=gc.HEADERS, data=_data)
-        if resp and resp.json()["status"] == True:
+        resp = _session.post(_url, headers=gc.HEADERS, data=_data, allow_redirects=False)
+        if 300 <= resp.status_code < 400:
+            return {"status": False, "msg": "账号密码登录返回重定向，已停止；请使用浏览器登录并导入 Cookie"}
+        if resp.status_code != 200:
+            raise RuntimeError(f"登录请求失败：HTTP {resp.status_code}")
+        try:
+            payload = resp.json()
+        except ValueError:
+            return {"status": False, "msg": "账号密码登录返回非 JSON 页面，请使用 Cookie 登录"}
+        if payload.get("status") is True:
             save_cookies(_session)
             SessionManager.update_cookies()
             logger.info("登录成功...")
@@ -436,7 +452,7 @@ class Chaoxing:
                 logger.debug(f"获取当前登录用户名失败: {e}")
             return {"status": True, "msg": "登录成功"}
         else:
-            return {"status": False, "msg": str(resp.json()["msg2"])}
+            return {"status": False, "msg": str(payload.get("msg2", "账号密码登录失败，请使用 Cookie 登录"))}
 
     @staticmethod
     def get_name() -> str:
@@ -452,43 +468,39 @@ class Chaoxing:
         return ""
 
     def _validate_cookie_session(self) -> bool:
-        session = SessionManager.get_instance()._session
-        if not session.cookies.get("_uid"):
+        session = SessionManager.get_session()
+        if not any(c.name in ('_uid', 'UID') and not c.is_expired() for c in session.cookies):
             return False
-
-        test_session = requests.Session()
-        test_session.headers.update(gc.HEADERS)
-        test_session.cookies.update(session.cookies.get_dict())
-
+        resp = session.post(
+            "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/courselistdata",
+            data={"courseType": 1, "courseFolderId": 0, "query": "", "superstarClass": 0},
+        )
+        from api.exceptions import SessionExpired
         try:
-            resp = test_session.post(
-                "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/courselistdata",
-                data={"courseType": 1, "courseFolderId": 0, "query": "", "superstarClass": 0},
-                timeout=8,
-            )
-        except RequestException as exc:
-            logger.debug("Cookie validation request failed: {}", exc)
+            check_response(resp)
+        except SessionExpired:
             return False
-
-        if resp.status_code != 200:
-            return False
-
-        if "passport2.chaoxing.com" in resp.text or "login" in resp.text.lower():
-            return False
-
+        # A transport error or 403 is NOT evidence that cookies expired.
+        save_cookies(session)
         return True
 
+    @staticmethod
+    def _cookie_value(name, default=None):
+        values = {c.value for c in SessionManager.get_session().cookies
+                  if c.name == name and not c.is_expired()}
+        if len(values) > 1:
+            from api.exceptions import SessionExpired
+            raise SessionExpired("Cookie 身份值冲突，请重新导入同一账号的 Cookie")
+        return next(iter(values), default)
+
     def get_fid(self):
-        _session = SessionManager.get_session()
-        return _session.cookies.get("fid", 1024)
+        return self._cookie_value("fid", 1024)
 
     def get_uid(self):
-        s = SessionManager.get_session()
-        if "_uid" in s.cookies:
-            return s.cookies["_uid"]
-        if "UID" in s.cookies:
-            return s.cookies["UID"]
-        raise ValueError("Cannot get uid !")
+        uid = self._cookie_value("_uid") or self._cookie_value("UID")
+        if uid:
+            return uid
+        raise ValueError("缺少用户身份 Cookie")
 
     def get_course_list(self):
         _session = SessionManager.get_session()
@@ -502,12 +514,14 @@ class Chaoxing:
             "Referer": "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction?moocDomain=https://mooc1-1.chaoxing.com/mooc-ans",
         }
         _resp = _session.post(_url, headers=_headers, data=_data)
-        # logger.trace(f"原始课程列表内容:\n{_resp.text}")
+        check_response(_resp)
+        logger.debug("请求诊断详情已省略，避免泄露会话信息")
         logger.info("课程列表读取完毕...")
         course_list = decode_course_list(_resp.text)
 
         _interaction_url = "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/interaction"
         _interaction_resp = _session.get(_interaction_url)
+        check_response(_interaction_resp)
         course_folder = decode_course_folder(_interaction_resp.text)
         for folder in course_folder:
             _data = {
@@ -517,6 +531,7 @@ class Chaoxing:
                 "superstarClass": 0,
             }
             _resp = _session.post(_url, data=_data)
+            check_response(_resp)
             course_list += decode_course_list(_resp.text)
         return course_list
 
@@ -533,13 +548,13 @@ class Chaoxing:
         resp = s.get(url, params=params, allow_redirects=False)
         if resp.status_code != 200:
             logger.error("Failed to get activity list, return code: " + str(resp.status_code))
-            logger.debug("Request url: " + resp.url)
+            logger.debug("请求诊断详情已省略，避免泄露会话信息")
             return []
 
         data = resp.json()
         if data["result"] != 1:
             logger.error("Unknown status: {} {}", data["result"], data["errorMsg"])
-            logger.debug("Request url: " + resp.url)
+            logger.debug("请求诊断详情已省略，避免泄露会话信息")
             return []
 
         return data["data"]["activeList"]
@@ -560,7 +575,7 @@ class Chaoxing:
         }
         resp = s.get('https://mobilelearn.chaoxing.com/newsign/preSign', params=params)
         resp_txt = resp.text
-        logger.debug("Request url" + resp.url)
+        logger.debug("请求诊断详情已省略，避免泄露会话信息")
         if resp.status_code != 200:
             logger.error("Failed to get sign in, return code: " + str(resp.status_code) + "message: " + resp_txt)
 
@@ -601,11 +616,11 @@ class Chaoxing:
     def get_course_point(self, _courseid, _clazzid, _cpi):
         _session = SessionManager.get_session()
         _url = f"https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse?courseid={_courseid}&clazzid={_clazzid}&cpi={_cpi}&ut=s"
-        logger.trace("URL: " + _url)
+        logger.debug("请求诊断详情已省略，避免泄露会话信息")
         logger.trace("开始读取课程所有章节...")
         _resp = _session.get(_url)
 
-        logger.trace(f"原始章节列表内容:\n{_resp.text}")
+        check_response(_resp)
         logger.info("课程章节读取成功...")
         return decode_course_point(_resp.text)
 
@@ -621,7 +636,9 @@ class Chaoxing:
             "ut": "s",
             "cpi": course["cpi"],
             "v": "2025-0424-1038-3",
-            "mooc2": 1
+            "mooc2": 1,
+            "isMicroCourse": "false",
+            "editorPreview": 0,
         }
 
         # 学习界面任务卡片数, 很少有3个的, 但是对于章节解锁任务点少一个都不行, 可以从API /mooc-ans/mycourse/studentstudyAjax获取值, 或者干脆直接加, 但二者都会造成额外的请求
@@ -631,11 +648,13 @@ class Chaoxing:
 
             cards_params.update({"num": _possible_num})
             _resp = _session.get("https://mooc1.chaoxing.com/mooc-ans/knowledge/cards", params=cards_params)
-            if _resp.status_code != 200:
-                logger.error(f"未知错误: {_resp.status_code} 正在跳过")
-                logger.error(_resp.text)
-                return [], {}
+            check_response(_resp)
+            if not re.search(r"mArg\s*=\s*\{", _resp.text) and "章节未开放" not in _resp.text and "暂无内容" not in _resp.text:
+                raise ResponseFormatError("任务卡片格式无法识别；不能判定为空任务或成功")
 
+            if "暂无内容" in _resp.text and not re.search(r"mArg\s*=", _resp.text):
+                # Official cards page explicitly says empty; stop probing higher card indices.
+                break
             _job_list, _job_info = decode_course_card(_resp.text)
             if _job_info.get("notOpen", False):
                 # 直接返回, 节省一次请求
@@ -646,9 +665,11 @@ class Chaoxing:
             job_info.update(_job_info)
 
         if not job_list:
-            self.study_emptypage(course, point)
+            result = self.study_emptypage(course, point)
+            if result != StudyResult.SUCCESS:
+                raise ResponseFormatError("空页面处理未成功，章节不能标记成功")
 
-        logger.trace(f"原始任务点列表内容:\n{_resp.text}")
+        save_cookies(_session)
         logger.info("章节任务点读取成功...")
 
         return job_list, job_info
@@ -719,36 +740,9 @@ class Chaoxing:
         def perform_request(rt_val):
             params.update({"rt": rt_val, "_t": get_timestamp()})
             res = _session.get(_url, params=params, headers=headers)
-            if res.status_code == 403 or '验证码' in res.text or 'validate' in res.text:
-                logger.warning("检测到验证码拦截，正在尝试自动通过验证码...")
-                try:
-                    from api.captcha import CxCaptcha
-                    cookies_str = "; ".join([f"{k}={v}" for k, v in _session.cookies.items()])
-                    ua = headers.get("User-Agent", gc.HEADERS.get("User-Agent"))
-                    ocr_inst = getattr(self, '_ocr', None)
-                    if ocr_inst is None:
-                        from api.captcha import ocr_init
-                        ocr_inst = ocr_init()
-                        if ocr_inst:
-                            self._ocr = ocr_inst
-                    captcha_solver = CxCaptcha(user_agent=ua, cookies=cookies_str, ocr=ocr_inst)
-                    solved = False
-                    for attempt in range(3):
-                        logger.info(f"第 {attempt + 1} 次尝试通关验证码...")
-                        if captcha_solver.try_pass():
-                            logger.success("验证码通关成功！")
-                            solved = True
-                            break
-                        else:
-                            logger.warning("验证码验证失败，正在重试...")
-                            time.sleep(2)
-                    if solved:
-                        _session.cookies.update(captcha_solver.s.cookies)
-                        res = _session.get(_url, params=params, headers=headers)
-                    else:
-                        logger.error("多次验证码通关失败，可能需要手动干预。")
-                except Exception as e:
-                    logger.error(f"验证码通关逻辑异常: {e}")
+            if res.status_code == 403 or '验证码' in res.text:
+                from api.exceptions import AccessDenied
+                raise AccessDenied("平台要求验证或拒绝访问，请在官方网页手动处理")
             return res
 
         rt = _job['rt']
@@ -759,47 +753,12 @@ class Chaoxing:
                 rt = "0.9" if rt_char == "d" else "1"
                 logger.trace(f"Got rt from otherinfo: {rt}")
 
-        if rt:
-            logger.trace(f"Got rt: {rt}")
-            _job['rt'] = rt
-            resp = perform_request(rt)
-        else:
-            logger.warning("Failed to get rt")
-            for rt in [0.9, 1]:
-                resp = perform_request(rt)
-                if resp.status_code == 200:
-                    logger.trace(resp.text)
-                    return resp.json()["isPassed"], 200
-                elif resp.status_code == 403:
-                    logger.warning("出现403报错, 正常尝试切换rt")
-                else:
-                    logger.warning("未知错误 jobid={}, status_code={}, 摘要:\n{}",
-                                   _job.get("jobid"),
-                                   resp.status_code,
-                                   resp.text[:200])
-                    break
-
-        if resp.status_code == 200:
-            logger.trace(resp.text)
-            return resp.json()["isPassed"], 200
-
-        elif resp.status_code == 403:
-            logger.debug(
-                "视频进度上报返回403, jobid={}, 摘要={}",
-                _job.get("jobid"),
-                resp.text[:200],
-            )
-
-            # 若出现两个rt参数都返回403的情况, 则跳过当前任务
-            logger.error("出现403报错, 尝试修复无效, 正在跳过当前任务点...")
-            logger.error("请求url: {}", resp.url)
-            logger.error("请求头: {}", dict(_session.headers) | headers)
-            return False, 403
-
-        logger.error(f"未知错误: {resp.status_code}")
-        logger.error("请求url:", resp.url)
-        logger.error("请求头：", dict(_session.headers) | headers)
-        return False, resp.status_code
+        if not rt:
+            raise ResponseFormatError("缺少视频 rt 参数，请检查官方页面，停止猜测请求参数")
+        _job['rt'] = rt
+        resp = perform_request(rt)
+        check_response(resp)
+        return resp.json()["isPassed"], 200
 
     def _refresh_video_status(self, session: requests.Session, job: dict, _type: Literal["Video", "Audio"]) \
             -> Optional[dict]:
@@ -817,7 +776,7 @@ class Chaoxing:
 
         if resp.status_code != 200:
             logger.debug("刷新视频状态返回码异常: {}" % resp.status_code)
-            logger.debug(resp.text)
+            logger.debug("请求诊断详情已省略，避免泄露会话信息")
             return None
 
         try:
@@ -880,9 +839,6 @@ class Chaoxing:
 
         logger.info(f"开始任务: {_job['name']}, 总时长: {duration}s, 已进行: {play_time}s")
 
-        forbidden_retry = 0
-        max_forbidden_retry = 2
-
         passed, state = self.video_progress_log(_session, _course, _job, _job_info, _dtoken, duration, duration,
                                                 _type, headers=headers, _isdrag=4)
         if passed:
@@ -899,30 +855,7 @@ class Chaoxing:
                                                             int(play_time), _type, headers=headers)
 
                     if state == 403:
-                        if forbidden_retry >= max_forbidden_retry:
-                            logger.warning("403重试失败, 跳过当前任务")
-                            return StudyResult.FORBIDDEN
-                        forbidden_retry += 1
-                        logger.warning(
-                            "出现403报错, 正在尝试刷新会话状态 (第{}次)",
-                            forbidden_retry,
-                        )
-                        time.sleep(random.uniform(2, 4))
-                        refreshed_meta = self._recover_after_forbidden(_session, _job, _type)
-                        if refreshed_meta and refreshed_meta.get("dtoken") and refreshed_meta.get(
-                                "duration") is not None:
-                            _dtoken = refreshed_meta["dtoken"]
-                            duration = int(refreshed_meta["duration"])
-                            refreshed_play_time = refreshed_meta.get("playTime")
-                            if refreshed_play_time is not None:
-                                play_time = int(refreshed_play_time)
-
-                            logger.debug("刷新后的令牌: {}, 持续时间: {}, 播放时间: {}", _dtoken, duration, play_time)
-                            pbar = self._close_pbar_safe(pbar)
-                            continue
-                        else:
-                            logger.error("会话恢复失败，刷新后的元数据缺少必要字段 (dtoken, duration)")
-                            return StudyResult.ERROR
+                        return StudyResult.FORBIDDEN
 
                     elif not passed and state != 200:
                         return StudyResult.ERROR
@@ -1000,7 +933,8 @@ class Chaoxing:
         _url = "https://mooc1.chaoxing.com/mooc-ans/api/work"
 
         def is_not_permission_error(exception):
-            return not isinstance(exception, PermissionError)
+            from api.exceptions import AccessDenied, SessionExpired, ResponseFormatError
+            return not isinstance(exception, (PermissionError, AccessDenied, SessionExpired, ResponseFormatError))
 
         @retry(
             stop=stop_after_attempt(3),
@@ -1029,6 +963,8 @@ class Chaoxing:
                     "courseid": _course["courseId"],
                 }
             )
+
+            check_response(_resp)
 
             # 未创建完成该测验则不进行答题，目前遇到的情况是未创建完成等同于没题目
             if '教师未创建完成该测验' in _resp.text:
@@ -1067,6 +1003,8 @@ class Chaoxing:
             questions = {}
             try:
                 final_resp, questions = fetch_response_with_retry()
+            except (AccessDenied, SessionExpired):
+                raise
             except PermissionError as e:
                 logger.warning(f"跳过章节检测: {e}")
                 return StudyResult.SUCCESS
@@ -1481,7 +1419,7 @@ class Chaoxing:
             },
         )
         if _resp.status_code != 200:
-            logger.error(f"阅读任务学习失败 -> [{_resp.status_code}]{_resp.text}")
+            logger.debug("请求诊断详情已省略，避免泄露会话信息")
             return StudyResult.ERROR
         else:
             _resp_json = _resp.json()
@@ -1542,6 +1480,7 @@ class Chaoxing:
             },
             timeout=8,
         )
+        check_response(_resp)
         if _resp.status_code != 200:
             logger.error(f"空页面任务失败 -> [{_resp.status_code}]{point['title']}")
             return StudyResult.ERROR

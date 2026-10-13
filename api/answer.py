@@ -15,13 +15,11 @@ from typing import Optional
 import httpx
 import requests
 from openai import OpenAI
-from urllib3 import disable_warnings, exceptions
 
 from api.answer_check import check_answer
 from api.logger import logger
 
 # 关闭警告
-disable_warnings(exceptions.InsecureRequestWarning)
 
 __all__ = ["CacheDAO", "Tiku", "TikuFallback", "TikuYanxi", "TikuGo", "TikuLike", "TikuAdapter", "AI", "SiliconFlow",
            "TikuManual"]
@@ -587,7 +585,8 @@ class TikuYanxi(Tiku):
                 # 'type':q_info['type'], #修复478题目类型与答案类型不符（不想写后处理了）
                 # 没用，就算有type和options，言溪题库还是可能返回类型不符，问了客服，type仅用于收集
             },
-            verify=False
+            verify=True,
+            timeout=(5, 20),
         )
         if res.status_code == 200:
             res_json = res.json()
@@ -831,7 +830,7 @@ class TikuLike(Tiku):
 
         # 检查该token是否有余额
         if self._balance.get(token, 0) <= 0:
-            logger.error(f'{self.name}当前Token查询次数不足: ...{token[-5:]}')
+            logger.error(f'{self.name}当前Token查询次数不足: [凭据已隐藏]')
             # 尝试选择其他有余额的token
             available_tokens = [t for t in self._tokens if self._balance.get(t, 0) > 0]
             if available_tokens:
@@ -849,10 +848,10 @@ class TikuLike(Tiku):
             try_times += 1
             if ans:  # 如果查询成功，减少余额
                 self._balance[token] -= 1
-                logger.info(f'使用Token ...{token[-5:]} 查询成功，剩余次数: {self._balance[token]}')
+                logger.info(f'使用Token [凭据已隐藏] 查询成功，剩余次数: {self._balance[token]}')
                 break
             elif try_times < self._retry_times:
-                logger.warning(f'使用Token ...{token[-5:]} 查询失败，进行第 {try_times + 1} 次重试...')
+                logger.warning(f'使用Token [凭据已隐藏] 查询失败，进行第 {try_times + 1} 次重试...')
 
         # 10次查询后更新余额
         self._count = (self._count + 1) % 10
@@ -899,7 +898,7 @@ class TikuLike(Tiku):
                 self.query_api,
                 json=request_data,
                 headers=temp_headers,
-                verify=False,
+                verify=True,
                 timeout=self._timeout  # 添加超时设置
             )
         except requests.exceptions.Timeout:
@@ -1049,7 +1048,7 @@ class TikuLike(Tiku):
             res = requests.get(
                 self.balance_api,
                 headers=temp_headers,
-                verify=False,
+                verify=True,
                 timeout=self._timeout
             )
             if res.status_code == 200:
@@ -1079,7 +1078,7 @@ class TikuLike(Tiku):
             balance = self.get_api_balance(token)
             self._balance[token] = balance
             logger.info(
-                f"当前LIKE知识库Token: ...{token[-5:]} 的剩余查询次数为: {balance} (仅供参考, 实际次数以查询结果为准)")
+                f"当前LIKE知识库Token: [凭据已隐藏] 的剩余查询次数为: {balance} (仅供参考, 实际次数以查询结果为准)")
 
     def load_tokens(self) -> None:
         tokens_str = self._conf.get('tokens')
@@ -1142,7 +1141,8 @@ class TikuAdapter(Tiku):
                 'options': [sub(r'^[A-Za-z]\.?、?\s?', '', option) for option in options.split('\n')],
                 'type': type
             },
-            verify=False
+            verify=True,
+            timeout=(5, 20),
         )
         if res.status_code == 200:
             res_json = res.json()

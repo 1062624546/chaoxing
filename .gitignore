@@ -157,3 +157,9 @@ cache.json
 start*.bat
 .workbuddy/
 myConfig/
+
+# Runtime credentials and deployment data
+config/
+logs/
+.env
+cookies*.json

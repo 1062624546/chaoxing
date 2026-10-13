@@ -177,7 +177,7 @@ class ServerChan(NotificationService):
             return
 
         self.url = self._conf['url']
-        logger.info(f"已初始化Server酱通知服务，URL: {self.url}")
+        logger.info("通知服务已初始化（地址与凭据已隐藏）")
 
     def _send(self, message: str) -> None:
         """
@@ -195,7 +195,7 @@ class ServerChan(NotificationService):
         }
 
         try:
-            response = requests.post(self.url, json=params, headers=headers)
+            response = requests.post(self.url, json=params, headers=headers, timeout=(5, 20))
             response.raise_for_status()
             result = response.json()
             logger.info(f"Server酱通知发送成功: {result}")
@@ -218,7 +218,7 @@ class Qmsg(NotificationService):
             return
 
         self.url = self._conf['url']
-        logger.info(f"已初始化Qmsg酱通知服务，URL: {self.url}")
+        logger.info("通知服务已初始化（地址与凭据已隐藏）")
 
     def _send(self, message: str) -> None:
         """
@@ -231,7 +231,7 @@ class Qmsg(NotificationService):
         headers = {'Content-Type': 'application/json;charset=utf-8'}
 
         try:
-            response = requests.post(self.url, params=params, headers=headers)
+            response = requests.post(self.url, params=params, headers=headers, timeout=(5, 20))
             response.raise_for_status()
             result = response.json()
             logger.info(f"Qmsg酱通知发送成功: {result}")
@@ -254,7 +254,7 @@ class Bark(NotificationService):
             return
 
         self.url = self._conf['url']
-        logger.info(f"已初始化Bark通知服务，URL: {self.url}")
+        logger.info("通知服务已初始化（地址与凭据已隐藏）")
 
     def _send(self, message: str) -> None:
         """
@@ -266,7 +266,7 @@ class Bark(NotificationService):
         params = {'body': message}
 
         try:
-            response = requests.post(self.url, params=params)
+            response = requests.post(self.url, params=params, timeout=(5, 20))
             response.raise_for_status()
             result = response.json()
             logger.info(f"Bark通知发送成功: {result}")
@@ -289,7 +289,7 @@ class Telegram(NotificationService):
             return
         self.tg_chat_id = self._conf['tg_chat_id']
         self.url = self._conf['url']
-        logger.info(f"已初始化Telegram通知服务，Chat_id: {self.tg_chat_id} URL: {self.url}")
+        logger.info("通知服务已初始化（地址与凭据已隐藏）")
 
     def _send(self, message: str) -> None:
         """
@@ -305,7 +305,7 @@ class Telegram(NotificationService):
         }
 
         try:
-            response = requests.post(self.url, data=params)
+            response = requests.post(self.url, data=params, timeout=(5, 20))
             response.raise_for_status()
             result = response.json()
             if result.get('ok'):

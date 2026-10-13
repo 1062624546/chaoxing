@@ -27,3 +27,16 @@ class MaxRetryExceeded(Exception):
 class FontDecodeError(Exception):
     def __init__(self, *args: object):
         super().__init__(*args)
+
+
+class AccessDenied(Exception):
+    pass
+
+class SessionExpired(Exception):
+    pass
+
+class ResponseFormatError(Exception):
+    pass
+
+class RemoteHTTPError(Exception):
+    pass
