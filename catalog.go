@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"golang.org/x/net/html"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 )
 
 type Course struct{ ID, ClassID, CPI, Title string }
@@ -15,6 +17,7 @@ type Point struct {
 	ID, Title        string
 	Finished, Locked bool
 	JobCount         int
+	StudyEnc         string
 }
 type Job struct {
 	Kind          string
@@ -177,6 +180,7 @@ func parsePoints(b []byte) ([]Point, error) {
 	if e != nil {
 		return nil, e
 	}
+	enc := attr(first(root, func(n *html.Node) bool { return n.Data == "input" && attr(n, "id") == "enc" }), "value")
 	out := []Point{}
 	seen := map[string]bool{}
 	for _, n := range collect(root, func(x *html.Node) bool { return pointRE.MatchString(attr(x, "id")) }) {
@@ -186,7 +190,7 @@ func parsePoints(b []byte) ([]Point, error) {
 		}
 		seen[id] = true
 		tip := text(class(n, "bntHoverTips"))
-		p := Point{ID: id, Title: text(class(n, "clicktitle")), Finished: strings.Contains(tip, "已完成"), Locked: strings.Contains(tip, "解锁"), JobCount: int(number(attr(class(n, "knowledgeJobCount"), "value"), 1))}
+		p := Point{ID: id, StudyEnc: enc, Title: text(class(n, "clicktitle")), Finished: strings.Contains(tip, "已完成"), Locked: strings.Contains(tip, "解锁"), JobCount: int(number(attr(class(n, "knowledgeJobCount"), "value"), 1))}
 		if p.Title == "" {
 			return nil, fail("format", "章节名称缺失", 0)
 		}
@@ -264,6 +268,18 @@ func parseCards(b []byte) ([]Job, map[string]any, bool, error) {
 	return jobs, defaults, false, nil
 }
 func (s *Session) jobs(ctx context.Context, c Course, p Point) ([]Job, map[string]any, error) {
+	referer := ""
+	if p.StudyEnc != "" {
+		var err error
+		referer, err = s.openChapter(ctx, c, p)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	headers := map[string]string{"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "zh-CN,zh;q=0.9"}
+	if referer != "" {
+		headers["Referer"] = referer
+	}
 	jobs := []Job{}
 	defaults := map[string]any{}
 	seen := map[string]bool{}
@@ -272,7 +288,7 @@ func (s *Session) jobs(ctx context.Context, c Course, p Point) ([]Job, map[strin
 			return nil, nil, e
 		}
 		q := qv(map[string]string{"clazzid": c.ClassID, "courseid": c.ID, "knowledgeid": p.ID, "ut": "s", "cpi": c.CPI, "v": "2025-0424-1038-3", "mooc2": "1", "isMicroCourse": "false", "editorPreview": "0", "num": str(num)})
-		b, e := s.get(ctx, s.platform("/mooc-ans/knowledge/cards"), q, nil, true)
+		b, e := s.get(ctx, s.platform("/mooc-ans/knowledge/cards"), q, headers, true)
 		if e != nil {
 			return nil, nil, e
 		}
@@ -321,4 +337,40 @@ func selectCourses(cs []Course, ids []string) ([]Course, error) {
 		}
 	}
 	return out, nil
+}
+
+// Follow the official toOld() navigation; signatures originate from the course page.
+func (s *Session) openChapter(ctx context.Context, c Course, p Point) (string, error) {
+	target, err := url.Parse(s.platform("/mycourse/studentstudy"))
+	if err != nil {
+		return "", fail("config", "章节地址无效", 0)
+	}
+	target.RawQuery = qv(map[string]string{"chapterId": p.ID, "courseId": c.ID, "clazzid": c.ClassID, "cpi": c.CPI, "enc": p.StudyEnc, "mooc2": "1", "hidetype": "0", "fanyaVersion": "0"}).Encode()
+	transfer, err := url.Parse(s.platform("/mycourse/transfer"))
+	if err != nil {
+		return "", err
+	}
+	transfer.RawQuery = qv(map[string]string{"moocId": c.ID, "clazzid": c.ClassID, "linkTime": str(time.Now().UnixMilli()), "ut": "s", "refer": target.String()}).Encode()
+	finalURL := transfer.String()
+	client := *s.Client
+	policy := client.CheckRedirect
+	client.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		if policy != nil {
+			if err := policy(r, via); err != nil {
+				return err
+			}
+		}
+		finalURL = r.URL.String()
+		return nil
+	}
+	navigation := &Session{Client: &client, Jar: s.Jar, Base: s.Base, CookiePath: s.CookiePath}
+	_, err = navigation.get(ctx, transfer.String(), nil, map[string]string{"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"}, false)
+	if err != nil {
+		return "", err
+	}
+	final, err := url.Parse(finalURL)
+	if err != nil || final.Hostname() != target.Hostname() || final.Path != "/mycourse/studentstudy" || final.Query().Get("chapterId") != p.ID || final.Query().Get("courseId") != c.ID || final.Query().Get("clazzid") != c.ClassID {
+		return "", fail("format", "章节跳转未到达对应studentstudy页面，停止请求任务卡片", 0)
+	}
+	return finalURL, nil
 }

@@ -728,3 +728,65 @@ func TestDebugQueryRedactsCredentials(t *testing.T) {
 		t.Fatal(out)
 	}
 }
+
+func TestOfficialChapterTransferAndCardReferer(t *testing.T) {
+	s := newSession(newJar(), filepath.Join(t.TempDir(), "cookies.txt"))
+	var steps []string
+	s.Client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		steps = append(steps, r.URL.Path)
+		switch r.URL.Path {
+		case "/mycourse/transfer":
+			target, e := url.Parse(r.URL.Query().Get("refer"))
+			if e != nil {
+				t.Fatal(e)
+			}
+			if target.Query().Get("enc") != "fixture-signature" || target.Query().Get("chapterId") != "chapter" {
+				t.Fatal("incorrect transfer")
+			}
+			q := target.Query()
+			q.Set("openc", "fixture-openc")
+			target.RawQuery = q.Encode()
+			res := fakeResponse(r, 302, "")
+			res.Header.Set("Location", target.String())
+			return res, nil
+		case "/mycourse/studentstudy":
+			res := fakeResponse(r, 200, "chapter page")
+			res.Header.Add("Set-Cookie", "chapterSession=fresh; Path=/; Secure")
+			return res, nil
+		case "/mooc-ans/knowledge/cards":
+			ref, e := url.Parse(r.Header.Get("Referer"))
+			if e != nil || ref.Query().Get("openc") != "fixture-openc" {
+				t.Error("missing server redirect signature")
+			}
+			if c, e := r.Cookie("chapterSession"); e != nil || c.Value != "fresh" {
+				t.Error("chapter cookie not retained")
+			}
+			return fakeResponse(r, 200, `<div class="nullpage">暂无内容</div>`), nil
+		default:
+			t.Fatal("unexpected path", r.URL.Path)
+			return nil, nil
+		}
+	})
+	_, _, e := s.jobs(context.Background(), Course{ID: "course", ClassID: "class", CPI: "cpi"}, Point{ID: "chapter", StudyEnc: "fixture-signature"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(steps) != 3 {
+		t.Fatal(steps)
+	}
+}
+func TestChapterTransfer403StopsBeforeCards(t *testing.T) {
+	s := newSession(newJar(), "")
+	count := 0
+	s.Client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) { count++; return fakeResponse(r, 403, "forbidden"), nil })
+	_, _, e := s.jobs(context.Background(), Course{ID: "c", ClassID: "cl"}, Point{ID: "p", StudyEnc: "fixture"})
+	if e == nil || count != 1 {
+		t.Fatal(e, count)
+	}
+}
+func TestChapterEncFromCoursePage(t *testing.T) {
+	points, e := parsePoints([]byte(`<input id="enc" value="fixture"><div id="cur123"><a class="clicktitle">chapter</a></div>`))
+	if e != nil || len(points) != 1 || points[0].StudyEnc != "fixture" {
+		t.Fatal(points, e)
+	}
+}

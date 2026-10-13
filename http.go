@@ -329,7 +329,7 @@ func passwordForm(page []byte, username, password string) (url.Values, error) {
 
 // Only known non-secret routing fields are printable; unknown fields fail closed.
 func debugQuery(q url.Values) string {
-	safe := map[string]bool{"courseid": true, "courseId": true, "clazzid": true, "clazzId": true, "knowledgeid": true, "chapterId": true, "cpi": true, "num": true, "v": true, "isMicroCourse": true, "editorPreview": true, "courseType": true, "courseFolderId": true, "superstarClass": true}
+	safe := map[string]bool{"ut": true, "mooc2": true, "courseid": true, "courseId": true, "clazzid": true, "clazzId": true, "knowledgeid": true, "chapterId": true, "cpi": true, "num": true, "v": true, "isMicroCourse": true, "editorPreview": true, "courseType": true, "courseFolderId": true, "superstarClass": true}
 	out := url.Values{}
 	for key, values := range q {
 		if safe[key] {
