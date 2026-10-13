@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-type Course struct{ ID, ClassID, CPI, Title string }
+type Course struct{ ID, ClassID, CPI, Title, EntryURL string }
 type Point struct {
 	ID, Title        string
 	Finished, Locked bool
@@ -121,6 +121,7 @@ func parseCourses(b []byte) ([]Course, error) {
 			u, e := url.Parse(attr(a, "href"))
 			if e == nil && u.Query().Get("cpi") != "" {
 				c.CPI = u.Query().Get("cpi")
+				c.EntryURL = attr(a, "href")
 				break
 			}
 		}
@@ -203,20 +204,59 @@ func parsePoints(b []byte) ([]Point, error) {
 	return out, nil
 }
 func (s *Session) points(ctx context.Context, c Course) ([]Point, error) {
-	address := "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse"
-	q := qv(map[string]string{"courseid": c.ID, "clazzid": c.ClassID, "cpi": c.CPI, "ut": "s"})
-	b, e := s.get(ctx, address, q, nil, true)
-	if e != nil {
-		return nil, e
+	base, _ := url.Parse("https://mooc2-ans.chaoxing.com")
+	entry, err := url.Parse(c.EntryURL)
+	if err != nil {
+		return nil, fail("format", "课程入口链接无效", 0)
 	}
-	points, e := parsePoints(b)
-	if e != nil {
-		return nil, e
+	if c.EntryURL == "" {
+		entry, _ = url.Parse("/mooc2-ans/mycourse/stu")
+		entry.RawQuery = qv(map[string]string{"courseid": c.ID, "clazzid": c.ClassID, "cpi": c.CPI}).Encode()
+	}
+	entry = base.ResolveReference(entry)
+	if entry.Scheme != "https" || entry.Hostname() != base.Hostname() || entry.User != nil {
+		return nil, fail("format", "课程入口不是可信HTTPS地址", 0)
+	}
+	page, err := s.get(ctx, entry.String(), nil, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	q, err := catalogParams(page, c)
+	if err != nil {
+		return nil, err
+	}
+	address := "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse"
+	b, err := s.get(ctx, address, q, map[string]string{"Referer": entry.String()}, true)
+	if err != nil {
+		return nil, err
+	}
+	points, err := parsePoints(b)
+	if err != nil {
+		return nil, err
 	}
 	for i := range points {
 		points[i].CatalogURL = address + "?" + q.Encode()
 	}
 	return points, nil
+}
+func catalogParams(page []byte, c Course) (url.Values, error) {
+	root, err := parseDOM(page)
+	if err != nil {
+		return nil, err
+	}
+	fields := map[string]string{}
+	for _, n := range collect(root, func(n *html.Node) bool { return n.Data == "input" }) {
+		fields[attr(n, "id")] = attr(n, "value")
+	}
+	if fields["t"] == "" || fields["enc"] == "" {
+		return nil, fail("format", "课程入口页缺少t或enc，停止使用不完整的章节目录请求", 0)
+	}
+	for key, want := range map[string]string{"courseid": c.ID, "clazzid": c.ClassID, "cpi": c.CPI} {
+		if fields[key] != "" && fields[key] != want {
+			return nil, fail("format", "课程入口页身份字段与所选课程不一致", 0)
+		}
+	}
+	return qv(map[string]string{"courseid": c.ID, "clazzid": c.ClassID, "cpi": c.CPI, "ut": "s", "t": fields["t"], "stuenc": fields["enc"]}), nil
 }
 
 var mArgRE = regexp.MustCompile(`\bmArg\s*=\s*\{`)

@@ -826,3 +826,16 @@ func Test403HintDoesNotExposeHTMLSecrets(t *testing.T) {
 		t.Fatal(ref)
 	}
 }
+
+func TestCatalogParamsFromOfficialEntryPage(t *testing.T) {
+	q, e := catalogParams([]byte(`<input id="t" value="123456"><input id="enc" value="fixture-signature"><input id="courseid" value="course">`), Course{ID: "course", ClassID: "class", CPI: "cpi"})
+	if e != nil || q.Get("stuenc") != "fixture-signature" || q.Get("t") != "123456" {
+		t.Fatal(q, e)
+	}
+	if _, e := catalogParams([]byte(`missing fields`), Course{}); e == nil {
+		t.Fatal("missing entry fields accepted")
+	}
+	if _, e := catalogParams([]byte(`<input id="t" value="123"><input id="enc" value="fixture"><input id="courseid" value="other">`), Course{ID: "course"}); e == nil {
+		t.Fatal("wrong course accepted")
+	}
+}
