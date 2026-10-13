@@ -134,7 +134,7 @@ func (s *Session) request(ctx context.Context, method, address string, query url
 			return nil, fail("format", "响应超过16MB限制", 0)
 		}
 		if resp.StatusCode == 403 {
-			return nil, fail("blocked", "HTTP 403：平台拒绝访问，停止重试", 403)
+			return nil, fail("blocked", fmt.Sprintf("HTTP 403：%s %s%s 被拒绝，停止重试（参数已隐藏）", method, resp.Request.URL.Hostname(), resp.Request.URL.EscapedPath()+" 参数="+debugQuery(resp.Request.URL.Query())), 403)
 		}
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			target, err := resp.Location()
@@ -325,4 +325,18 @@ func passwordForm(page []byte, username, password string) (url.Values, error) {
 	form.Set("uname", encryptCredential(strings.TrimSpace(username)))
 	form.Set("password", encryptCredential(password))
 	return form, nil
+}
+
+// Only known non-secret routing fields are printable; unknown fields fail closed.
+func debugQuery(q url.Values) string {
+	safe := map[string]bool{"courseid": true, "courseId": true, "clazzid": true, "clazzId": true, "knowledgeid": true, "chapterId": true, "cpi": true, "num": true, "v": true, "isMicroCourse": true, "editorPreview": true, "courseType": true, "courseFolderId": true, "superstarClass": true}
+	out := url.Values{}
+	for key, values := range q {
+		if safe[key] {
+			out[key] = values
+		} else {
+			out.Set(key, "[隐藏]")
+		}
+	}
+	return out.Encode()
 }

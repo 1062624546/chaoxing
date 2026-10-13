@@ -91,6 +91,14 @@ func defaultCookiePath(p string) string {
 	return p[:n]
 }
 func (j *persistentJar) add(r storedCookie) error {
+	// Cookie header values may use surrounding double quotes (RFC 6265).
+	if len(r.Value) >= 2 && r.Value[0] == '"' && r.Value[len(r.Value)-1] == '"' {
+		r.Value = r.Value[1 : len(r.Value)-1]
+	}
+	if e := (&http.Cookie{Name: r.Name, Value: r.Value}).Valid(); e != nil {
+		return errors.New("Cookie 名称或值包含非法字符，请重新导出 Cookie（内容已隐藏）")
+	}
+
 	if !validDomain(r.Domain) || r.Name == "" {
 		return errors.New("Cookie 域名或名称无效")
 	}

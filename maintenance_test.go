@@ -697,3 +697,34 @@ func TestRedirectDiagnosticHidesSecrets(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+func TestQuotedCookieImport(t *testing.T) {
+	for _, raw := range []string{`_uid=123; token="abc=="`, `[{"name":"token","value":"\"abc==\"","domain":".chaoxing.com","path":"/"}]`} {
+		path := filepath.Join(t.TempDir(), "cookies.txt")
+		os.WriteFile(path, []byte(raw), 0600)
+		j, e := loadCookies(path)
+		if e != nil {
+			t.Fatal(e)
+		}
+		value, e := j.value("token")
+		if e != nil || value != "abc==" {
+			t.Fatal(value, e)
+		}
+	}
+}
+func TestInvalidCookieNotSilentlyCorrupted(t *testing.T) {
+	j := newJar()
+	for _, value := range []string{`ab"cd`, "abc\nsecret", `"unclosed`} {
+		if e := j.add(storedCookie{Name: "token", Value: value, Domain: ".chaoxing.com", Path: "/"}); e == nil || strings.Contains(e.Error(), value) {
+			t.Fatal("invalid cookie accepted or leaked")
+		}
+	}
+}
+
+func TestDebugQueryRedactsCredentials(t *testing.T) {
+	q := url.Values{"courseid": {"123"}, "knowledgeid": {"456"}, "enc": {"SECRET"}, "ticket": {"TICKET"}, "unknown": {"PRIVATE"}}
+	out := debugQuery(q)
+	if !strings.Contains(out, "courseid=123") || !strings.Contains(out, "knowledgeid=456") || strings.Contains(out, "SECRET") || strings.Contains(out, "TICKET") || strings.Contains(out, "PRIVATE") {
+		t.Fatal(out)
+	}
+}
