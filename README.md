@@ -1,160 +1,97 @@
-> Fork 维护与 Docker 部署说明：[维护与部署](docs/维护与部署.md)。Cookie 模式不会自动退回账号密码登录，HTTP 403 不再标记成功。
+# chaoxing（原生 Go 分支）
 
-# :computer: 超星学习通自动化完成任务点(命令行版)
+本分支将命令行运行版本迁移为 Go，基于 [Samueli924/chaoxing](https://github.com/Samueli924/chaoxing) 及本 Fork 的 Python 修复版。保留 GPL-3.0 许可证、原作者署名和字体映射资源。
 
-<p align="center">
-    <a href="https://github.com/Samueli924/chaoxing" target="_blank" style="margin-right: 20px; font-style: normal; text-decoration: none;">
-        <img src="https://img.shields.io/github/stars/Samueli924/chaoxing" alt="Github Stars" />
-    </a>
-    <a href="https://github.com/Samueli924/chaoxing" target="_blank" style="margin-right: 20px; font-style: normal; text-decoration: none;">
-        <img src="https://img.shields.io/github/forks/Samueli924/chaoxing" alt="Github Forks" />
-    </a>
-    <a href="https://github.com/Samueli924/chaoxing" target="_blank" style="margin-right: 20px; font-style: normal; text-decoration: none;">
-        <img src="https://img.shields.io/github/languages/code-size/Samueli924/chaoxing" alt="Code-size" />
-    </a>
-    <a href="https://github.com/Samueli924/chaoxing" target="_blank" style="margin-right: 20px; font-style: normal; text-decoration: none;">
-        <img src="https://img.shields.io/github/v/release/Samueli924/chaoxing?display_name=tag&sort=semver" alt="version" />
-    </a>
-</p>
-:muscle: 本项目的最终目的是通过开源消灭所谓的付费刷课平台，希望有能力的朋友都可以为这个项目提交代码，支持本项目的良性发展
+**Go 可执行文件不调用 Python，不需要 pip、Python、OCR、MySQL、Redis 或 Nginx。** Python 版本保留在本仓库 `main` 分支。
 
-:star: 觉得有帮助的朋友可以给个Star
+## 功能
 
-## :point_up: 更新通知
-20241021更新通知： 感谢[sz134055](https://github.com/sz134055)提交代码[PR #360](https://github.com/Samueli924/chaoxing/pull/360)，**添加了对题库答题的支持**  
+- Cookie/账号密码登录、课程列表、课程文件夹、章节与任务卡片解析。
+- Cookie 兼容旧请求头文本和 Python 修复版 JSON，保留域名、路径、过期及安全属性，原子保存为 0600 文件。
+- 视频/音频、文档、阅读、直播、章节测验；普通签到与章节访问次数选项。
+- 题库：AI（OpenAI 兼容）、SiliconFlow、TikuYanxi、TikuGo、TikuLike、TikuAdapter、TikuManual，多题库依次回退及 Go 答案缓存。
+- 单选、多选、判断、填空、简答；加密 TTF 字体解析、测验保存/提交、覆盖率控制、官方成绩查询和可选的有限重做。
+- 通知：ServerChan、Qmsg、Bark、Telegram。
+- 默认四并发，有限重试、Ctrl+C/SIGTERM 取消、日志脱敏及文件轮转。
 
-## :books: 使用方法
+配置沿用 `config_template.ini`。首次建议保留 `use_cookies=true`，设置实际课程 ID。已有有效配置不用重新填写 API Key。
 
-### 源码运行（Python 3.13+）
+**403、验证码、人脸/位置等平台验证不自动破解。** 不切换网络、代理或参数绕过访问拒绝；账号密码遇到重定向明确停止并提示使用 Cookie。迁移语言不能保证修复原有 403 或账号密码登录问题。
 
-1. clone 项目至本地
+## 与旧版的行为区别
 
-```bash
-git clone --depth=1 https://github.com/Samueli924/chaoxing 
-cd chaoxing
-```
+- 测验仅保存、缺少答案、平台尚未确认通过时显示“待确认/仅保存”，不显示“全部完成”。
+- 不随机猜测答案。没有答案的字段留空，按覆盖率决定保存或提交。
+- 文档/阅读等请求返回 200 后重新检查卡片，仍有任务则保持待确认。
+- 媒体进度按实际经过的时间记录，不在开始时发送整个视频时长。
+- 字体无法解析、题型未知或官方成绩无法确认时明确失败，不继续猜测提交。
+- 只支持正常签到，不处理位置、二维码、手势或验证码签到。章节访问不会发送伪装真人属性的监控心跳。
+- 旧 `app.py` 只有 Flask/Celery 初始化，没有实际 Web/API 路由；本 Go 分支提供 CLI，不启动额外 Web 服务。
+- Go 答案缓存为配置目录中的 `go-answer-cache.json`，不读取旧 Python 答案缓存。
 
-2. 安装依赖
+## 直接编译运行
+
+需要 Go 1.26 或更新版本；本次验证使用 Go 1.27.2。字体映射资源编译进可执行文件。
 
 ```bash
-pip install -r requirements.txt
+go mod download
+go test ./...
+go build -trimpath -ldflags="-s -w" -o chaoxing .
+cp config_template.ini config.ini
+# 在本地编辑 config.ini，写入实际课程 ID 等配置
+# 将自己的 Cookie 请求头私下写入 cookies.txt，不要提交凭据
+./chaoxing -c config.ini --check-login
+./chaoxing -c config.ini --list-courses
+./chaoxing -c config.ini
 ```
-或使用 `pip install .`（通过 pyproject.toml 安装依赖）
 
-3. (可选直接运行)
+`--check-login` 只验证会话，`--list-courses` 只列出课程。退出码：0 成功；1 失败或存在待确认/跳过章节；2 配置错误；130 用户中断。
+
+## Docker 部署
+
+服务器上的旧容器先单独停止，避免两个版本同时处理同一账号。不要停止其他服务。
 
 ```bash
-python main.py
+cd /opt/docker/projects/chaoxing
+git status --short
+git fetch origin
+git switch --track origin/go
+mkdir -p config logs
+[ -f config/config.ini ] || cp config_template.ini config/config.ini
+# 迁移已有有效配置，Cookie 放在 config/cookies.txt
+chown -R 10001:10001 config logs
+chmod 700 config logs
+chmod 600 config/config.ini config/cookies.txt
+docker compose -p chaoxing-go config --quiet
+docker compose -p chaoxing-go build
+docker compose -p chaoxing-go run --rm chaoxing --check-login -c /config/config.ini
+docker compose -p chaoxing-go up -d --no-deps chaoxing
+docker compose -p chaoxing-go logs --tail=100 -f chaoxing
 ```
 
-4. (可选配置文件运行)
+如果本地已有 `go` 分支，用 `git switch go`、`git pull --ff-only origin go` 更新。若有未提交改动，先备份或保存改动再切换。
 
-> 复制config_template.ini文件为config.ini文件，修改文件内的账号密码内容
+Docker 使用 Go 多阶段编译与缓存，最终镜像仅包含二进制、证书、时区和模板，不安装 Python 依赖。未设置 CPU/内存上限；保留非 root、只读根目录、无额外权限、独立网络、不开放端口。任务执行一次后退出，不自动循环重启。
+
+**首次构建仍会下载 Go 构建镜像、运行镜像与 Go 模块，速度取决于网络。** 以后只改配置/Cookie 不需要构建，只改代码能使用模块与编译缓存。本机没有 Docker 守护进程，尚未验证真实 Docker 构建。
+
+手动答题需要交互终端，执行 `docker compose -p chaoxing-go run --rm chaoxing`，不要和后台容器同时运行。
+
+## 测试与验证边界
 
 ```bash
-python main.py -c config.ini
+go test ./...
+go test -race ./...
+go vet ./...
+go test -fuzz=FuzzCardsParser -fuzztime=5s .
+go test -fuzz=FuzzFontParser -fuzztime=5s .
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o chaoxing .
 ```
 
-5. (可选命令行运行)
+本次验证：47 项单元测试通过；竞态检测与 `go vet` 通过；卡片解析模糊测试执行 42,471 次，字体解析模糊测试执行 95,113 次，均通过；Linux amd64、Linux arm64、Windows amd64 交叉编译通过。Linux amd64 静态二进制约 8.9MB。
 
-```bash
-python main.py -u 手机号 -p 密码 -l 课程ID1,课程ID2,课程ID3...(可选) -a [retry|ask|continue](可选)
-```
+测试使用本地模拟 HTTP 服务与合成 HTML/JSON/字形数据，覆盖 Cookie、登录重定向、403 不误报成功、不重试访问拒绝、有限重试、并发和取消、任务解析、题库和测验保存等。没有通过真实账号执行课程任务、测验提交、签到或通知；真实平台响应变化仍需脱敏日志继续维护。
 
-> Tips:  
-> 如果已安装低版本 Python 推荐使用 `uv` 运行：
+## 来源与许可证
 
-```bash
-uv run --python 3.13 main.py
-```
-
-使用配置文件运行 ：
-```bash
-uv run --python 3.13 main.py -c config.ini
-```
-
-### 打包文件运行
-1. 从最新[Releases](https://github.com/Samueli924/chaoxing/releases)中下载exe文件
-2. (可选直接运行) 双击运行即可
-3. (可选配置文件运行) 下载config_template.ini文件保存为config.ini文件，修改文件内的账号密码内容, 执行 `./chaoxing.exe -c config.ini`
-4. (可选命令行运行)`./chaoxing.exe -u "手机号" -p "密码" -l 课程ID1,课程ID2,课程ID3...(可选) -a [retry|ask|continue](可选)`
-
-### Docker运行
-1. 构建Docker镜像
-   ```bash
-   docker build -t chaoxing .
-   ```
-
-2. 运行Docker容器
-   ```bash
-   # 直接运行（将使用默认配置模板）
-   docker run -it chaoxing
-   
-   # 使用自定义配置文件运行
-   docker run -it -v /本地路径/config.ini:/config/config.ini chaoxing
-   ```
-
-3. 配置说明
-   - Docker版本默认使用挂载到 `/config/config.ini` 的配置文件
-   - 首次运行时，会自动将 `config_template.ini` 复制到该位置作为模板
-   - 可以将本地编辑好的配置文件挂载到容器中，按照上述示例命令操作
-
-### 题库配置说明
-
-在你的配置文件中找到`[tiku]`，按照注释填写想要使用的题库名（即`provider`，大小写要一致），并填写必要信息，如token，然后在启动时添加`-c [你的配置文件路径]`即可。
-
-题库会默认使用根目录下的`config.ini`文件中的配置，所以你可以复制配置模板（参照前面的说明）命名为`config.ini`，并只配置题库项`[tiku]`，这样即使你不填写账号之类的信息，不使用`-c`参数指定配置文件，题库也会根据这个配置文件自动配置并启用。
-
-对于那些有章节检测且任务点需要解锁的课程，必须配置题库。
-
-**提交模式与答题**
-不配置题库（既不提供配置文件，也没有放置默认配置文件`config.ini`或填写要使用的题库）视为不使用题库，对于章节检测等需要答题的任务会自动跳过。
-题库覆盖率：搜到的题目占总题目的比例
-提交模式`submit`值为
-
-- `true`：会答完题，达到题库题目覆盖率提交，没达到只保存，**正确率不做保证**。
-- `false`：会答题，但是不会提交，仅保存搜到答案的，随后你可以自行前往学习通查看、修改、提交。**任何填写不正确的`submit`值会被视为`false`**
-
-> 题库名即`answer.py`模块中根据`Tiku`类实现的具体题库类，例如`TikuYanxi`（言溪题库），在填写时，请务必保持大小写一致。
-
-### 已关闭任务点处理配置说明
-
-在配置文件的 `[common]` 部分，可以通过 `notopen_action` 选项配置遇到已关闭任务点时的处理方式:
-
-- `retry` (默认): 遇到关闭的任务点时尝试重新完成上一个任务点，如果连续重试 3 次仍然失败 (或未配置题库及自动提交) 则停止
-- `ask`: 遇到关闭的任务点时询问用户是否继续。选择继续后会自动跳过连续的关闭任务点，直到遇到开放的任务点
-- `continue`: 自动跳过所有关闭的任务点，继续检查和完成后续任务点
-
-也可以通过命令行参数 `-a` 或 `--notopen-action` 指定处理方式，例如：
-
-```bash
-python main.py -a ask  # 使用询问模式
-```
-
-### 章节学习次数配置说明
-
-在配置文件的 `[common]` 部分，可以通过下面两个选项控制章节学习次数功能：
-
-- `add_learning_count = false`：是否在完成刷课任务后，继续对课程章节执行学习次数增加
-- `target_count = 100`：章节学习次数的目标总次数，程序会轮询课程章节直到达到该次数
-
-当前实现会先完成所选课程的任务点，再统一执行章节学习次数增加流程。如果开启了 `add_learning_count`，它会作为刷课完成后的追加步骤执行，而不是独立模式。
-
-**外部通知配置说明**
-
-这功能会在所有课程学习任务结束后，或是程序出现错误时，使用外部通知服务推送消息告知你（~~有用但不多~~）
-
-与题库配置类似，不填写视为不使用，按照注释填写想要使用的外部通知服务（也是`provider`，大小写要一致），并填写必要的`url`
-
-## :heart: CONTRIBUTORS
-
-![Alt](https://repobeats.axiom.co/api/embed/d3931e84b4b2f17cbe60cafedb38114bdf9931cb.svg "Repobeats analytics image")  
-
-<a style="margin-top: 15px" href="https://github.com/Samueli924/chaoxing/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=Samueli924/chaoxing" />
-</a>
-
-## :warning: 免责声明
-- 本代码遵循 [GPL-3.0 License](https://github.com/Samueli924/chaoxing/blob/main/LICENSE) 协议，允许**开源/免费使用和引用/修改/衍生代码的开源/免费使用**，不允许**修改和衍生的代码作为闭源的商业软件发布和销售**，禁止**使用本代码盈利**，以此代码为基础的程序**必须**同样遵守 [GPL-3.0 License](https://github.com/Samueli924/chaoxing/blob/main/LICENSE) 协议
-- 本代码仅用于**学习讨论**，禁止**用于盈利**
-- 他人或组织使用本代码进行的任何**违法行为**与本人无关
+原项目：[Samueli924/chaoxing](https://github.com/Samueli924/chaoxing)。字体哈希方案来自 SocialSisterYi，并经 Samueli924 维护；Go 分支沿用原仓库 `resource/font_map_table.json`。GPL-3.0 许可证见 [LICENSE](LICENSE)。

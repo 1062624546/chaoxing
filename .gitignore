@@ -163,3 +163,8 @@ config/
 logs/
 .env
 cookies*.json
+
+# Go build outputs
+/chaoxing
+/chaoxing.exe
+/dist/

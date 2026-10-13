@@ -1,46 +1,54 @@
-name: CI
-
+name: Go 构建与测试
 on:
   push:
-
-  # Allows you to run this workflow manually from the Actions tab
+    branches: [go]
+  pull_request:
+    branches: [go]
   workflow_dispatch:
-
+permissions:
+  contents: read
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.2'
+          cache: true
+      - run: go test -race ./...
+      - run: go vet ./...
   build:
-    runs-on: ${{ matrix.os }}
+    needs: test
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
-          - os: windows-latest
-            architecture: 'x64'
-            name: 'win64'
-
+          - os: linux
+            arch: amd64
+            suffix: ''
+          - os: linux
+            arch: arm64
+            suffix: ''
+          - os: windows
+            arch: amd64
+            suffix: '.exe'
     steps:
-      - uses: actions/checkout@v3
-      - name: Set up Python
-        uses: actions/setup-python@v3
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          python-version: '3.13'
-          architecture: ${{matrix.architecture}}
-
-      - name: Install requirements
+          go-version: '1.27.2'
+          cache: true
+      - name: 编译原生可执行文件
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
         run: |
-          pip install -r requirements.txt
-          pip install pyinstaller
-
-      - name: Build win bin
-        run: pyinstaller -F main.py -n 'chaoxing' --add-data "resource;resource" --hidden-import=chardet
-
-      - name: Create release package
-        run: |
-          mkdir release
-          copy dist\chaoxing.exe release\
-          copy config_template.ini release\
-          cd release
-          7z a -tzip chaoxing.zip *
-
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w -X main.version=${GITHUB_SHA}" -o dist/chaoxing${{ matrix.suffix }} .
+          cp config_template.ini LICENSE dist/
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}
-          path: 'release/chaoxing.zip'
+          name: chaoxing-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/

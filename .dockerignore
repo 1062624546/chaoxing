@@ -10,3 +10,7 @@ config.ini
 config/
 logs/
 tests/
+
+chaoxing
+chaoxing.exe
+dist/
