@@ -42,10 +42,11 @@ cp config_template.ini config.ini
 # 将自己的 Cookie 请求头私下写入 cookies.txt，不要提交凭据
 ./chaoxing -c config.ini --check-login
 ./chaoxing -c config.ini --list-courses
+./chaoxing -c config.ini --list-chapters
 ./chaoxing -c config.ini
 ```
 
-`--check-login` 只验证会话，`--list-courses` 只列出课程。退出码：0 成功；1 失败或存在待确认/跳过章节；2 配置错误；130 用户中断。
+`--check-login` 只验证会话，`--list-courses` 只列出课程，`--list-chapters` 按 `course_list` 打开课程入口并只读取章节目录；这三种检查均不执行视频、测验或签到，目录检查不初始化题库。退出码：0 成功；1 失败或存在待确认/跳过章节；2 配置错误；130 用户中断。
 
 ## Docker 部署
 

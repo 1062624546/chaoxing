@@ -894,3 +894,58 @@ func TestPointsFollowsOfficialMiddleEntryAndFinalReferers(t *testing.T) {
 		t.Fatalf("official entry navigation failed: steps=%d err=%v", steps, err)
 	}
 }
+
+func TestPasswordLoginRetainsCompletePageReferer(t *testing.T) {
+	s := newSession(newJar(), filepath.Join(t.TempDir(), "cookies.txt"))
+	s.Client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/login":
+			q := r.URL.Query()
+			if _, ok := q["fid"]; !ok || q.Get("newversion") != "true" || q.Get("refer") != "https://i.chaoxing.com" {
+				t.Error("official login entry parameters missing")
+			}
+			return fakeResponse(r, 200, loginFixture), nil
+		case "/fanyalogin":
+			ref, err := url.Parse(r.Header.Get("Referer"))
+			if err != nil || ref.Query().Get("newversion") != "true" || ref.Query().Get("refer") != "https://i.chaoxing.com" {
+				t.Error("full login page Referer missing")
+			}
+			res := fakeResponse(r, 200, `{"status":true}`)
+			res.Header.Add("Set-Cookie", "_uid=fixture; Domain=.chaoxing.com; Path=/; Secure")
+			return res, nil
+		default:
+			return fakeResponse(r, 200, "courses"), nil
+		}
+	})
+	if err := s.login(context.Background(), Config{Common: map[string]string{"username": "fake", "password": "fake"}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPersonalSpaceRedirectStaysHTTPS(t *testing.T) {
+	s := newSession(newJar(), "")
+	calls := 0
+	s.Client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if r.URL.Scheme != "https" {
+			t.Fatal("HTTP request must never be sent")
+		}
+		if calls == 1 {
+			res := fakeResponse(r, 302, "")
+			res.Header.Set("Location", "http://i.chaoxing.com/base?fixture=1")
+			return res, nil
+		}
+		return fakeResponse(r, 200, "home"), nil
+	})
+	_, final, err := s.getPage(context.Background(), "https://i.chaoxing.com/base?fixture=1", nil, nil)
+	if err != nil || calls != 2 || final != "https://i.chaoxing.com/base?fixture=1" {
+		t.Fatalf("HTTPS navigation failed: %v calls=%d", err, calls)
+	}
+	for _, target := range []string{"http://evil.test/base", "http://i.chaoxing.com/other", "http://i.chaoxing.com:8080/base", "http://passport2.chaoxing.com/base"} {
+		r, _ := http.NewRequest("GET", target, nil)
+		previous, _ := http.NewRequest("GET", "https://i.chaoxing.com/base", nil)
+		if err := s.Client.CheckRedirect(r, []*http.Request{previous}); err == nil {
+			t.Fatal("unobserved HTTP redirect accepted")
+		}
+	}
+}

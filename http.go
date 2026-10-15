@@ -49,6 +49,14 @@ func newSession(j *persistentJar, path string) *Session {
 		if len(via) >= 5 {
 			return fail("redirect", fmt.Sprintf("页面重定向超过5次：%s → %s（参数已隐藏）", via[len(via)-1].URL.Hostname()+via[len(via)-1].URL.EscapedPath(), r.URL.Hostname()+r.URL.EscapedPath()), 0)
 		}
+		// The captured personal-space redirect advertises HTTP, while Chrome
+		// follows the identical URL over HTTPS. Never send this hop over HTTP.
+		if len(via) > 0 && r.URL.Scheme == "http" && r.URL.Host == "i.chaoxing.com" && r.URL.User == nil && r.URL.Path == "/base" {
+			previous := via[len(via)-1].URL
+			if previous.Scheme == "https" && previous.Host == r.URL.Host && previous.Path == r.URL.Path {
+				r.URL.Scheme = "https"
+			}
+		}
 		if r.URL.Scheme != "https" || !validDomain(r.URL.Hostname()) {
 			return fail("redirect", "平台重定向至非学习通域名或非HTTPS地址，已停止", 0)
 		}
@@ -207,7 +215,8 @@ func (s *Session) login(ctx context.Context, c Config) error {
 		}
 		info("账号密码登录阶段：打开官方登录页")
 		pageURL := "https://passport2.chaoxing.com/login"
-		page, e := s.get(ctx, pageURL, url.Values{"refer": {"https://i.chaoxing.com"}}, map[string]string{"X-Login-Page": "1"}, false)
+		var finalPageURL string
+		page, e := s.requestURL(ctx, "GET", pageURL, url.Values{"fid": {""}, "newversion": {"true"}, "refer": {"https://i.chaoxing.com"}}, nil, map[string]string{"X-Login-Page": "1"}, false, &finalPageURL)
 		if e != nil {
 			return e
 		}
@@ -220,7 +229,7 @@ func (s *Session) login(ctx context.Context, c Config) error {
 		authSession := &Session{Client: &clone, Jar: s.Jar, Base: s.Base, CookiePath: s.CookiePath}
 		info("账号密码登录阶段：提交官方登录表单")
 		b, e := authSession.request(ctx, "POST", "https://passport2.chaoxing.com/fanyalogin", nil, []byte(form.Encode()), map[string]string{
-			"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest", "Origin": "https://passport2.chaoxing.com", "Referer": pageURL,
+			"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest", "Origin": "https://passport2.chaoxing.com", "Referer": finalPageURL,
 		}, false)
 		if e != nil {
 			return e

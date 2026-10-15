@@ -18,7 +18,7 @@ var version = "go-dev"
 func execute(ctx context.Context, args []string) int {
 	fs := flag.NewFlagSet("chaoxing", flag.ContinueOnError)
 	var path, username, password, courses, action string
-	var cookies, list, check, showVersion, autoSign, addCount, verbose bool
+	var cookies, list, listChapters, check, showVersion, autoSign, addCount, verbose bool
 	var jobs, target int
 	var speed, retryInterval float64
 	fs.StringVar(&path, "c", "config.ini", "配置文件路径")
@@ -32,6 +32,7 @@ func execute(ctx context.Context, args []string) int {
 	fs.StringVar(&action, "notopen-action", "", "未开放章节：retry/continue")
 	fs.Float64Var(&retryInterval, "retry-interval", -1, "重试间隔秒数")
 	fs.BoolVar(&list, "list-courses", false, "登录后只列出课程")
+	fs.BoolVar(&listChapters, "list-chapters", false, "只读取所选课程的章节目录，不处理任务")
 	fs.BoolVar(&check, "check-login", false, "只验证登录，不处理任务")
 	fs.BoolVar(&showVersion, "version", false, "显示版本")
 	fs.BoolVar(&autoSign, "auto-sign", false, "普通签到，不处理验证码/位置签到")
@@ -147,6 +148,20 @@ func execute(ctx context.Context, args []string) int {
 	if e != nil {
 		info("课程选择失败：%v", e)
 		return 2
+	}
+	if listChapters {
+		for _, course := range selected {
+			points, err := s.points(ctx, course)
+			if err != nil {
+				info("读取章节失败：%v", err)
+				return 1
+			}
+			fmt.Printf("课程ID: %s 课程名: %s 章节数: %d\n", course.ID, course.Title, len(points))
+			for _, point := range points {
+				fmt.Printf("章节ID: %s 章节名: %s\n", point.ID, point.Title)
+			}
+		}
+		return 0
 	}
 	answers, e := newAnswers(c)
 	if e != nil {
