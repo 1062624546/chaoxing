@@ -119,7 +119,7 @@ func parseCourses(b []byte) ([]Course, error) {
 		}
 		for _, a := range collect(n, func(x *html.Node) bool { return x.Data == "a" }) {
 			u, e := url.Parse(attr(a, "href"))
-			if e == nil && u.Query().Get("cpi") != "" {
+			if e == nil && validCourseEntry(u, c) {
 				c.CPI = u.Query().Get("cpi")
 				c.EntryURL = attr(a, "href")
 				break
@@ -132,6 +132,16 @@ func parseCourses(b []byte) ([]Course, error) {
 	}
 	return out, nil
 }
+
+// Only accept course entry routes observed in the official course list.
+func validCourseEntry(u *url.URL, c Course) bool {
+	base, _ := url.Parse("https://mooc2-ans.chaoxing.com")
+	u = base.ResolveReference(u)
+	route := u.Hostname() == "mooc2-ans.chaoxing.com" && u.Path == "/mooc2-ans/mycourse/stu" || u.Hostname() == "mooc1.chaoxing.com" && u.Path == "/visit/stucoursemiddle"
+	q := u.Query()
+	return route && u.Scheme == "https" && u.User == nil && u.Port() == "" && q.Get("courseid") == c.ID && q.Get("clazzid") == c.ClassID && q.Get("cpi") != "" && (c.CPI == "" || q.Get("cpi") == c.CPI)
+}
+
 func (s *Session) courses(ctx context.Context) ([]Course, error) {
 	address := "https://mooc2-ans.chaoxing.com/mooc2-ans/visit/courselistdata"
 	form := url.Values{"courseType": {"1"}, "courseFolderId": {"0"}, "query": {""}, "superstarClass": {"0"}}
@@ -214,10 +224,10 @@ func (s *Session) points(ctx context.Context, c Course) ([]Point, error) {
 		entry.RawQuery = qv(map[string]string{"courseid": c.ID, "clazzid": c.ClassID, "cpi": c.CPI}).Encode()
 	}
 	entry = base.ResolveReference(entry)
-	if entry.Scheme != "https" || entry.Hostname() != base.Hostname() || entry.User != nil {
+	if !validCourseEntry(entry, c) {
 		return nil, fail("format", "课程入口不是可信HTTPS地址", 0)
 	}
-	page, err := s.get(ctx, entry.String(), nil, nil, true)
+	page, entryURL, err := s.getPage(ctx, entry.String(), nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +236,7 @@ func (s *Session) points(ctx context.Context, c Course) ([]Point, error) {
 		return nil, err
 	}
 	address := "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse"
-	b, err := s.get(ctx, address, q, map[string]string{"Referer": entry.String()}, true)
+	b, catalogURL, err := s.getPage(ctx, address, q, map[string]string{"Referer": entryURL})
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +245,7 @@ func (s *Session) points(ctx context.Context, c Course) ([]Point, error) {
 		return nil, err
 	}
 	for i := range points {
-		points[i].CatalogURL = address + "?" + q.Encode()
+		points[i].CatalogURL = catalogURL
 	}
 	return points, nil
 }

@@ -80,6 +80,10 @@ func (s *Session) pace(ctx context.Context) error {
 }
 func (s *Session) platform(path string) string { return strings.TrimRight(s.Base, "/") + path }
 func (s *Session) request(ctx context.Context, method, address string, query url.Values, body []byte, headers map[string]string, readOnly bool) ([]byte, error) {
+	return s.requestURL(ctx, method, address, query, body, headers, readOnly, nil)
+}
+
+func (s *Session) requestURL(ctx context.Context, method, address string, query url.Values, body []byte, headers map[string]string, readOnly bool, finalURL *string) ([]byte, error) {
 	attempts := 1
 	if readOnly && (method == "GET" || method == "HEAD") {
 		attempts = 3
@@ -155,6 +159,9 @@ func (s *Session) request(ctx context.Context, method, address string, query url
 		if resp.StatusCode != 200 {
 			return nil, fail("server", fmt.Sprintf("HTTP %d：请求未成功", resp.StatusCode), resp.StatusCode)
 		}
+		if finalURL != nil {
+			*finalURL = resp.Request.URL.String()
+		}
 		return data, nil
 	}
 	return nil, fail("network", "请求尝试次数耗尽", 0)
@@ -162,6 +169,14 @@ func (s *Session) request(ctx context.Context, method, address string, query url
 func (s *Session) get(ctx context.Context, address string, q url.Values, headers map[string]string, readOnly bool) ([]byte, error) {
 	return s.request(ctx, "GET", address, q, nil, headers, readOnly)
 }
+
+// Use the URL of the successful response, including all platform redirects.
+func (s *Session) getPage(ctx context.Context, address string, q url.Values, headers map[string]string) ([]byte, string, error) {
+	var finalURL string
+	b, err := s.requestURL(ctx, "GET", address, q, nil, headers, true, &finalURL)
+	return b, finalURL, err
+}
+
 func (s *Session) postForm(ctx context.Context, address string, form url.Values) ([]byte, error) {
 	return s.request(ctx, "POST", address, nil, []byte(form.Encode()), map[string]string{"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest"}, false)
 }
@@ -190,6 +205,7 @@ func (s *Session) login(ctx context.Context, c Config) error {
 		if c.Common["username"] == "" || c.Common["password"] == "" {
 			return fail("config", "配置缺少账号密码或 use_cookies=true", 0)
 		}
+		info("账号密码登录阶段：打开官方登录页")
 		pageURL := "https://passport2.chaoxing.com/login"
 		page, e := s.get(ctx, pageURL, url.Values{"refer": {"https://i.chaoxing.com"}}, map[string]string{"X-Login-Page": "1"}, false)
 		if e != nil {
@@ -202,6 +218,7 @@ func (s *Session) login(ctx context.Context, c Config) error {
 		clone := *s.Client
 		clone.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 		authSession := &Session{Client: &clone, Jar: s.Jar, Base: s.Base, CookiePath: s.CookiePath}
+		info("账号密码登录阶段：提交官方登录表单")
 		b, e := authSession.request(ctx, "POST", "https://passport2.chaoxing.com/fanyalogin", nil, []byte(form.Encode()), map[string]string{
 			"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "X-Requested-With": "XMLHttpRequest", "Origin": "https://passport2.chaoxing.com", "Referer": pageURL,
 		}, false)
@@ -235,6 +252,7 @@ func (s *Session) login(ctx context.Context, c Config) error {
 			if err != nil || target.Scheme != "https" || !validDomain(target.Hostname()) || target.User != nil {
 				return fail("redirect", "登录返回非可信HTTPS跳转地址，已停止", 0)
 			}
+			info("账号密码登录阶段：访问平台返回的登录跳转页")
 			if _, err = s.get(ctx, target.String(), nil, nil, false); err != nil {
 				return err
 			}

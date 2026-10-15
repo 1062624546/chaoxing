@@ -236,7 +236,7 @@ func TestAESMatchesRoundtrip(t *testing.T) {
 	}
 }
 func TestCoursesAndFoldersFields(t *testing.T) {
-	b := []byte(`<div class="course" id="1"><input class="clazzId" value="class"><input class="courseId" value="course"><a href="/study?cpi=cpi&amp;x=1">go</a><span class="course-name" title="课程">课程</span></div>`)
+	b := []byte(`<div class="course" id="1"><input class="clazzId" value="class"><input class="courseId" value="course"><a href="/mooc2-ans/mycourse/stu?courseid=course&amp;clazzid=class&amp;cpi=cpi&amp;x=1">go</a><span class="course-name" title="课程">课程</span></div>`)
 	cs, e := parseCourses(b)
 	if e != nil || len(cs) != 1 || cs[0].CPI != "cpi" {
 		t.Fatal(cs, e)
@@ -837,5 +837,60 @@ func TestCatalogParamsFromOfficialEntryPage(t *testing.T) {
 	}
 	if _, e := catalogParams([]byte(`<input id="t" value="123"><input id="enc" value="fixture"><input id="courseid" value="other">`), Course{ID: "course"}); e == nil {
 		t.Fatal("wrong course accepted")
+	}
+}
+
+func TestCourseEntrySelectionSkipsUnrelatedCpiLinks(t *testing.T) {
+	page := `<div class="course"><input class="courseId" value="course"><input class="clazzId" value="class"><a href="/unrelated?cpi=wrong">other</a><a href="https://mooc1.chaoxing.com/visit/stucoursemiddle?courseid=course&amp;clazzid=class&amp;cpi=right&amp;ismooc2=1">entry</a><span class="course-name">title</span></div>`
+	cs, err := parseCourses([]byte(page))
+	if err != nil || len(cs) != 1 || cs[0].CPI != "right" || !strings.Contains(cs[0].EntryURL, "/visit/stucoursemiddle") {
+		t.Fatalf("entry selection failed: %v", err)
+	}
+	for _, address := range []string{"https://evil.test/visit/stucoursemiddle?courseid=course&clazzid=class&cpi=right", "https://mooc1.chaoxing.com/visit/stucoursemiddle?courseid=other&clazzid=class&cpi=right", "http://mooc1.chaoxing.com/visit/stucoursemiddle?courseid=course&clazzid=class&cpi=right"} {
+		u, _ := url.Parse(address)
+		if validCourseEntry(u, Course{ID: "course", ClassID: "class"}) {
+			t.Fatal("untrusted or mismatched entry accepted")
+		}
+	}
+}
+
+func TestPointsFollowsOfficialMiddleEntryAndFinalReferers(t *testing.T) {
+	s := newSession(newJar(), filepath.Join(t.TempDir(), "cookies.txt"))
+	steps := 0
+	finalEntry := "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/stu?courseid=course&clazzid=class&cpi=cpi&t=fixture-time&enc=fixture-entry"
+	finalCatalog := "https://mooc2-ans.chaoxing.com/mooc2-ans/mycourse/studentcourse?courseid=course&clazzid=class&cpi=cpi&t=fixture-time&stuenc=fixture-entry&ut=s&final=1"
+	s.Client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		steps++
+		switch r.URL.Path {
+		case "/visit/stucoursemiddle":
+			res := fakeResponse(r, 302, "")
+			res.Header.Set("Location", finalEntry)
+			res.Header.Add("Set-Cookie", "route=middle; Path=/; Secure")
+			return res, nil
+		case "/mooc2-ans/mycourse/stu":
+			if _, err := r.Cookie("route"); err == nil {
+				t.Error("host-only cookie leaked across hosts")
+			}
+			return fakeResponse(r, 200, `<input id="t" value="fixture-time"><input id="enc" value="fixture-entry">`), nil
+		case "/mooc2-ans/mycourse/studentcourse":
+			if r.URL.Query().Get("final") == "" {
+				if r.Header.Get("Referer") != finalEntry {
+					t.Error("entry final URL was not used as Referer")
+				}
+				if r.URL.Query().Get("stuenc") != "fixture-entry" || r.URL.Query().Get("t") != "fixture-time" {
+					t.Error("entry fields lost")
+				}
+				res := fakeResponse(r, 302, "")
+				res.Header.Set("Location", finalCatalog)
+				return res, nil
+			}
+			return fakeResponse(r, 200, `<input id="enc" value="fixture-study"><div id="cur123"><a class="clicktitle">chapter</a></div>`), nil
+		}
+		t.Fatal("unexpected request path", r.URL.Path)
+		return nil, nil
+	})
+	ps, err := s.points(context.Background(), Course{ID: "course", ClassID: "class", CPI: "cpi", EntryURL: "https://mooc1.chaoxing.com/visit/stucoursemiddle?courseid=course&clazzid=class&cpi=cpi&ismooc2=1"})
+	if err != nil || len(ps) != 1 || ps[0].CatalogURL != finalCatalog || ps[0].StudyEnc != "fixture-study" || steps != 4 {
+		t.Fatalf("official entry navigation failed: steps=%d err=%v", steps, err)
 	}
 }
